@@ -1,0 +1,5 @@
+# col_order extension
+comment = 'Advisory tool for most small column definition order'
+default_version = '1.0'
+module_pathname = '$libdir/col_order'
+relocatable = true

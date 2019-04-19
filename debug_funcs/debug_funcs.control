@@ -1,0 +1,5 @@
+# debug_funcs extension
+comment = 'Debug functions'
+default_version = '1.0'
+module_pathname = '$libdir/debug_funcs'
+requires = 'pageinspect'
