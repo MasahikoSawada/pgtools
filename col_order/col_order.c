@@ -51,7 +51,7 @@ _PG_init(void)
 }
 
 static void
-dump_order_with_msg(List *l, char *msg)
+dump_order(List *l, Size size, char *msg)
 {
 	ListCell *cell;
 	StringInfoData buf;
@@ -63,26 +63,7 @@ dump_order_with_msg(List *l, char *msg)
 		appendStringInfo(&buf, "%u ", type->oid);
 	}
 
-	elog(NOTICE, "%s: %s", buf.data, msg);
-}
-
-/* Debug print */
-static void
-dump_order_with_size(List *l, Size size)
-{
-	ListCell *cell;
-	StringInfoData buf;
-
-	initStringInfo(&buf);
-	foreach(cell, l)
-	{
-		Form_pg_type type = (Form_pg_type) lfirst(cell);
-		appendStringInfo(&buf, "%u ", type->oid);
-	}
-	if (size != 0)
-		elog(NOTICE, "%s: %lu", buf.data, size);
-	else
-		elog(NOTICE, "%s", buf.data);
+	elog(NOTICE, "%s: %lu (%s) (threshold %lu)", buf.data, size, msg, minSize);
 }
 
 /* Return list of data type oids from 'array */
@@ -153,6 +134,14 @@ compute_col_order_recurse(List *target, List *remain)
 	/* computed size of all columns */
 	if (remain == NIL)
 	{
+		if (col_order_debug_enabled)
+		{
+			if (size < minSize)
+				dump_order(target, size, "selected");
+			else
+				dump_order(target, size, "not selected");
+		}
+
 		/* update minimun size and order */
 		if (size < minSize)
 		{
@@ -166,17 +155,13 @@ compute_col_order_recurse(List *target, List *remain)
 	if (minSize < size)
 	{
 		if (col_order_debug_enabled)
-		{
-			if (remain != NIL)
-				dump_order_with_msg(target, "skipped");
-			else
-				dump_order_with_size(target, size);
-		}
+			dump_order(target, size, "skipped");
+
 		return;
 	}
 
 	if (col_order_debug_enabled)
-		dump_order_with_size(target, size);
+		dump_order(target, size, "intermediate");
 
 	foreach(lc, remain)
 	{
