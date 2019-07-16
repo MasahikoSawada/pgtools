@@ -1,0 +1,13 @@
+CREATE EXTENSION col_order;
+SELECT * FROM compute_col_order(ARRAY['bigint'::regtype, 'bigint', 'bigint', 'bigint', 'bigint', 'bigint', 'bigint', 'bigint']);
+ min_size |                         min_order                         
+----------+-----------------------------------------------------------
+       64 | {bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint}
+(1 row)
+
+SELECT * FROM compute_col_order(ARRAY['bigint'::regtype, 'text', 'timestamptz', 'jsonb', 'timestamp', 'date']);
+ min_size |                                     min_order                                     
+----------+-----------------------------------------------------------------------------------
+      232 | {bigint,text,"timestamp with time zone",jsonb,date,"timestamp without time zone"}
+(1 row)
+

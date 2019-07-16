@@ -5,6 +5,7 @@ DATA = col_order--1.0.sql
 OBJS = col_order.o
 
 EXTENSION = col_order
+REGRESS= col_order
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config
