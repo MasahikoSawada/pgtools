@@ -67,6 +67,7 @@ dump_order(List *l, Size size, char *msg)
 		 buf.data, size,
 		 msg == NULL ? "" : msg,
 		 minSize);
+	pfree(buf.data);
 }
 
 /* Return list of data type oids from 'array */
@@ -183,6 +184,8 @@ compute_col_order_recurse(List *target, List *remain)
 		r = list_delete_ptr(r, (void *) del);
 
 		compute_col_order_recurse(t, r);
+		list_free(t);
+		list_free(r);
 		n++;
 	}
 }
