@@ -42,7 +42,7 @@ To compute the minmum size column definition order `compute_col_order` uses DP (
 
 # Debugging
 
-`compute_col_order` emits condidates of column order when `col_order.debug_enabled` is true.
+`compute_col_order` emits candidates of column order when `col_order.debug_enabled` is true.
 
 ```
 =# SET col_order.debug_enabled TO true;
