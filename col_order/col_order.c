@@ -63,7 +63,10 @@ dump_order(List *l, Size size, char *msg)
 		appendStringInfo(&buf, "%u ", type->oid);
 	}
 
-	elog(NOTICE, "%s: %lu (%s) (threshold %lu)", buf.data, size, msg, minSize);
+	elog(NOTICE, "%s: %lu %s (minSize %lu)",
+		 buf.data, size,
+		 msg == NULL ? "" : msg,
+		 minSize);
 }
 
 /* Return list of data type oids from 'array */
@@ -137,9 +140,9 @@ compute_col_order_recurse(List *target, List *remain)
 		if (col_order_debug_enabled)
 		{
 			if (size < minSize)
-				dump_order(target, size, "selected");
+				dump_order(target, size, "(selected)");
 			else
-				dump_order(target, size, "not selected");
+				dump_order(target, size, "(not selected)");
 		}
 
 		/* update minimun size and order */
@@ -155,13 +158,13 @@ compute_col_order_recurse(List *target, List *remain)
 	if (minSize < size)
 	{
 		if (col_order_debug_enabled)
-			dump_order(target, size, "skipped");
+			dump_order(target, size, "(skipped)");
 
 		return;
 	}
 
 	if (col_order_debug_enabled)
-		dump_order(target, size, "intermediate");
+		dump_order(target, size, NULL);
 
 	foreach(lc, remain)
 	{
