@@ -1,0 +1,5 @@
+# page_repair extension
+comment = 'Individual page reparing'
+default_version = '1.0'
+module_pathname = '$libdir/page_repair'
+relocatable = true
