@@ -12,3 +12,8 @@ CREATE FUNCTION pg_repair_page(regclass, bigint, text, text)
 RETURNS bool
 AS 'MODULE_PATHNAME', 'pg_repair_page_fork'
 LANGUAGE C STRICT PARALLEL UNSAFE;
+
+CREATE FUNCTION get_page(text, text, int4)
+RETURNS bytea
+AS 'MODULE_PATHNAME', 'get_page'
+LANGUAGE C STRICT PARALLEL SAFE;

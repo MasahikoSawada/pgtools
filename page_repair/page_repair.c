@@ -15,6 +15,7 @@
 
 #include "access/relation.h"
 #include "access/xlog.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_control.h"
 #include "catalog/pg_class.h"
 #include "fe_utils/connect.h"
@@ -31,17 +32,19 @@
 #include "utils/builtins.h"
 #include "utils/pg_lsn.h"
 #include "utils/rel.h"
+#include "utils/varlena.h"
 
 #include "libpq-int.h"
 
-#define STANDBY_LSN_CHECK_INTERVAL (5 * 1000L) /* 5 sec */
-
 PG_MODULE_MAGIC;
+
+#define STANDBY_LSN_CHECK_INTERVAL (5 * 1000L) /* 5 sec */
 
 PGconn *conn = NULL;
 
 PG_FUNCTION_INFO_V1(pg_repair_page);
 PG_FUNCTION_INFO_V1(pg_repair_page_fork);
+PG_FUNCTION_INFO_V1(get_page);
 
 static void repair_page_internal(Oid oid, BlockNumber blkno, const char *forkname,
 								 const char *conninfo);
@@ -112,12 +115,6 @@ check_standby(void)
 	if (strcmp(res, "t") != 0)
 		ereport(ERROR,
 				(errmsg("the source server must be in recovery mode")));
-	pfree(res);
-
-	res = exec_query("SELECT EXISTS (SELECT * FROM pg_extension WHERE extname = 'pageinspect')");
-	if (strcmp(res, "t") != 0)
-		ereport(ERROR,
-				(errmsg("the source server must install pageinspect")));
 	pfree(res);
 }
 
@@ -193,8 +190,6 @@ verify_page(BlockNumber blkno, char *page)
 	chk_expected = ((PageHeader) page)->pd_checksum;
 	chk_found = pg_checksum_page(page, blkno);
 
-	elog(NOTICE, "expected %d got %d",chk_expected, chk_found);
-
 	return chk_expected == chk_found;
 }
 
@@ -206,7 +201,7 @@ fetch_page_from_standby(Relation relation, const char *forkname, BlockNumber blk
 	PGresult *res;
 
 	initStringInfo(&sql);
-	appendStringInfo(&sql, "SELECT get_raw_page('%s', '%s', %u)",
+	appendStringInfo(&sql, "SELECT get_page('%s', '%s', %u)",
 					 RelationGetRelationName(relation), forkname, blkno);
 
 	res = PQexecParams(conn, sql.data,
@@ -228,7 +223,7 @@ fetch_page_from_standby(Relation relation, const char *forkname, BlockNumber blk
 }
 
 static void
-wait_until_replay(XLogRecPtr lsn)
+wait_until_catchup(XLogRecPtr lsn)
 {
 	int rc;
 
@@ -288,6 +283,47 @@ pg_repair_page(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(true);
 }
 
+/* Copied from pageinspect.get_raw_page */
+Datum
+get_page(PG_FUNCTION_ARGS)
+{
+	text *relname = PG_GETARG_TEXT_PP(0);
+	text *forkname = PG_GETARG_TEXT_PP(1);
+	uint32 blkno = PG_GETARG_UINT32(2);
+	ForkNumber forknum = forkname_to_number(text_to_cstring(forkname));
+	bytea	   *raw_page;
+	RangeVar   *relrv;
+	Relation	rel;
+	char	   *raw_page_data;
+	Buffer		buf;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 (errmsg("must be superuser to use raw page functions"))));
+
+	relrv = makeRangeVarFromNameList(textToQualifiedNameList(relname));
+	rel = relation_openrv(relrv, AccessShareLock);
+
+	/* Initialize buffer to copy to */
+	raw_page = (bytea *) palloc(BLCKSZ + VARHDRSZ);
+	SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
+	raw_page_data = VARDATA(raw_page);
+
+	/* Take a verbatim copy of the page */
+
+	buf = ReadBufferExtended(rel, forknum, blkno, RBM_NORMAL, NULL);
+	LockBuffer(buf, BUFFER_LOCK_SHARE);
+
+	memcpy(raw_page_data, BufferGetPage(buf), BLCKSZ);
+
+	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+	ReleaseBuffer(buf);
+
+	relation_close(rel, AccessShareLock);
+
+	PG_RETURN_BYTEA_P(raw_page);
+}
 
 static void
 repair_page_internal(Oid oid, BlockNumber blkno, const char *forkname,
@@ -343,17 +379,23 @@ repair_page_internal(Oid oid, BlockNumber blkno, const char *forkname,
 		bufHdr = GetBufferDescriptor(buf_id);
 		buf_state = pg_atomic_read_u32(&bufHdr->state);
 
-		elog(NOTICE, "buf_state %x", buf_state);
-
 		/*
 		 * The buffer is already is in shard buffer. We do nothing for already-loaded
 		 * pages that is dirtied since it will  be flushed to the disk.
 		 */
 		if ((buf_state & (BM_DIRTY | BM_JUST_DIRTIED)) != 0)
 		{
-			elog(NOTICE,"skipping page repair of the given page --- page is loaded to the shared buffer");
+			elog(NOTICE,"skipping page repair of the given page --- page is marked as dirty");
 			LWLockRelease(partlock);
 			goto cleanup;
+		}
+
+		if ((buf_state & BM_VALID) != 0)
+		{
+			uint32 new_state;
+			new_state = LockBufHdr(bufHdr);
+			new_state &= ~(BM_VALID);
+			UnlockBufHdr(bufHdr, new_state);
 		}
 	}
 
@@ -371,7 +413,7 @@ repair_page_internal(Oid oid, BlockNumber blkno, const char *forkname,
 	 * The page is corrupted. We wait for the standby's applay LSN  to reach the
 	 * current local LSN .
 	 */
-	wait_until_replay(target_lsn);
+	wait_until_catchup(target_lsn);
 
 	/* Get the target page from the standby server */
 	fetch_page_from_standby(relation, forkname, blkno, standby_page);
@@ -383,7 +425,7 @@ repair_page_internal(Oid oid, BlockNumber blkno, const char *forkname,
 
 	/* Overwrite the corrupted page */
 	smgrwrite(relation->rd_smgr, forknum, blkno, standby_page, 1);
-p	smgrimmedsync(relation->rd_smgr, forknum);
+	smgrimmedsync(relation->rd_smgr, forknum);
 
 cleanup:
 	relation_close(relation, NoLock);

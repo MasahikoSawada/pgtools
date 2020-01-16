@@ -1,14 +1,16 @@
 # pgtools/page_repair/Makefile
 
 MODULE_big = page_repair
-DATA = page_repair--1.0.sql
-OBJS = page_repair.o
-
-PG_CPPFLAGS = -I$(libpq_srcdir)
-SHLIB_LINK = $(libpq)
+PGFILEDESC = "page_repair - repair corrupted page"
 
 EXTENSION = page_repair
-REGRESS= page_repair
+DATA = page_repair--1.0.sql
+OBJS = $(WIN32RES) page_repair.o
+
+TAP_TESTS = 1
+
+PG_CPPFLAGS = -I$(libpq_srcdir)
+SHLIB_LINK = $(libpq_pgport)
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config
