@@ -1,0 +1,5 @@
+# tid_bench extension
+comment = 'micro benchmark for tid storing/lookup'
+default_version = '1.0'
+module_pathname = '$libdir/tid_bench'
+relocatable = on
