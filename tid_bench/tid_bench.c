@@ -70,7 +70,7 @@ typedef struct LVTestType
 	void (*attach_fn) (struct LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 					   BlockNumber maxblk, OffsetNumber maxoff);
 	bool (*reaped_fn) (struct LVTestType *lvtt, ItemPointer itemptr);
-	Size (*show_mem_usage_fn) (struct LVTestType *lvtt);
+	Size (*mem_usage_fn) (struct LVTestType *lvtt);
 } LVTestType;
 
 /* Simulated index tuples always uses an simple array */
@@ -98,7 +98,7 @@ static void array_fini(LVTestType *lvtt);
 static void array_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 						 BlockNumber maxblk, OffsetNumber maxoff);
 static bool array_reaped(LVTestType *lvtt, ItemPointer itemptr);
-static Size array_show_mem_usage(LVTestType *lvtt);
+static Size array_mem_usage(LVTestType *lvtt);
 
 /* tbm */
 static void tbm_init(LVTestType *lvtt, uint64 nitems);
@@ -106,7 +106,7 @@ static void tbm_fini(LVTestType *lvtt);
 static void tbm_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 						 BlockNumber maxblk, OffsetNumber maxoff);
 static bool tbm_reaped(LVTestType *lvtt, ItemPointer itemptr);
-static Size tbm_show_mem_usage(LVTestType *lvtt);
+static Size tbm_mem_usage(LVTestType *lvtt);
 
 /* intset */
 static void intset_init(LVTestType *lvtt, uint64 nitems);
@@ -114,7 +114,7 @@ static void intset_fini(LVTestType *lvtt);
 static void intset_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 						 BlockNumber maxblk, OffsetNumber maxoff);
 static bool intset_reaped(LVTestType *lvtt, ItemPointer itemptr);
-static Size intset_show_mem_usage(LVTestType *lvtt);
+static Size intset_mem_usage(LVTestType *lvtt);
 
 /* dtstore */
 static void dtstore_init(LVTestType *lvtt, uint64 nitems);
@@ -122,7 +122,7 @@ static void dtstore_fini(LVTestType *lvtt);
 static void dtstore_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 						 BlockNumber maxblk, OffsetNumber maxoff);
 static bool dtstore_reaped(LVTestType *lvtt, ItemPointer itemptr);
-static Size dtstore_show_mem_usage(LVTestType *lvtt);
+static Size dtstore_mem_usage(LVTestType *lvtt);
 
 
 /* Misc functions */
@@ -145,7 +145,7 @@ static void load_dtstore(DeadTupleStore *dtstore, ItemPointerData *itemptrs, int
 		.init_fn = n##_init, \
 		.attach_fn = n##_attach, \
 		.reaped_fn = n##_reaped, \
-		.show_mem_usage_fn = n##_show_mem_usage, \
+		.mem_usage_fn = n##_mem_usage, \
 			}
 
 #define TEST_SUBJECT_TYPES 4
@@ -268,8 +268,16 @@ generate_random_itemptrs(uint64 nitems,
 /* ---------- ARRAY ---------- */
 static void array_init(LVTestType *lvtt, uint64 nitems)
 {
-	lvtt->private = (ItemPointer) MemoryContextAllocHuge(TopMemoryContext,
+	MemoryContext old_ctx;
+
+	lvtt->mcxt = AllocSetContextCreate(TopMemoryContext,
+									   "array bench",
+									   ALLOCSET_DEFAULT_SIZES);
+
+	old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
+	lvtt->private = (ItemPointer) MemoryContextAllocHuge(lvtt->mcxt,
 														 sizeof(ItemPointerData) * nitems);
+	MemoryContextSwitchTo(old_ctx);
 }
 static void array_fini(LVTestType *lvtt)
 {
@@ -345,9 +353,9 @@ static bool array_reaped(LVTestType *lvtt, ItemPointer itemptr)
 	return (res != NULL);
 }
 static uint64
-array_show_mem_usage(LVTestType *lvtt)
+array_mem_usage(LVTestType *lvtt)
 {
-	return sizeof(ItemPointerData) * lvtt->dtinfo.nitems;
+	return MemoryContextMemAllocated(lvtt->mcxt, true);
 }
 
 /* ---------- TBM ---------- */
@@ -381,11 +389,11 @@ tbm_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 static bool
 tbm_reaped(LVTestType *lvtt, ItemPointer itemptr)
 {
-	//return tbm_is_member((TIDBitmap *) lvtt->private, itemptr);
-	return true;
+	return tbm_is_member((TIDBitmap *) lvtt->private, itemptr);
+	//return true;
 }
 static Size
-tbm_show_mem_usage(LVTestType *lvtt)
+tbm_mem_usage(LVTestType *lvtt)
 {
 	return MemoryContextMemAllocated(lvtt->mcxt, true);
 }
@@ -424,7 +432,7 @@ intset_reaped(LVTestType *lvtt, ItemPointer itemptr)
 	return intset_is_member((IntegerSet *) lvtt->private, itemptr_encode(itemptr));
 }
 static uint64
-intset_show_mem_usage(LVTestType *lvtt)
+intset_mem_usage(LVTestType *lvtt)
 {
 	return intset_memory_usage((IntegerSet *) lvtt->private);
 }
@@ -462,7 +470,7 @@ dtstore_reaped(LVTestType *lvtt, ItemPointer itemptr)
 	return dtstore_lookup((DeadTupleStore *) lvtt->private, itemptr);
 }
 static uint64
-dtstore_show_mem_usage(LVTestType *lvtt)
+dtstore_mem_usage(LVTestType *lvtt)
 {
 	return MemoryContextMemAllocated(lvtt->mcxt, true);
 }
@@ -520,13 +528,11 @@ attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk, BlockNumber maxblk,
 	/* update cache information */
 	update_info((DeadTupleInfo *) &(lvtt->dtinfo), nitems, minblk, maxblk, maxoff);
 
-	if (lvtt->mcxt)
-		old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
+	old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
 
 	lvtt->attach_fn(lvtt, nitems, minblk, maxblk, maxoff);
 
-	if (lvtt->mcxt)
-		MemoryContextSwitchTo(old_ctx);
+	MemoryContextSwitchTo(old_ctx);
 }
 
 static void
@@ -538,8 +544,7 @@ bench(LVTestType *lvtt)
 	if (!lvtt->private)
 		elog(ERROR, "%s dead tuples are not preapred", lvtt->name);
 
-	if (lvtt->mcxt)
-		old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
+	old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
 
 	for (int i = 0; i < IndexTids_cache->dtinfo.nitems; i++)
 	{
@@ -548,15 +553,14 @@ bench(LVTestType *lvtt)
 			matched++;
 	}
 
-	if (lvtt->mcxt)
-		MemoryContextSwitchTo(old_ctx);
+	MemoryContextSwitchTo(old_ctx);
 
 	elog(NOTICE, "\"%s\": dead tuples %lu, index tuples %lu, mathed %d, mem %zu",
 		 lvtt->name,
 		 lvtt->dtinfo.nitems,
 		 IndexTids_cache->dtinfo.nitems,
 		 matched,
-		 lvtt->show_mem_usage_fn(lvtt));
+		 lvtt->mem_usage_fn(lvtt));
 }
 
 /* SQL-callable functions */
@@ -658,8 +662,7 @@ attach_dead_tuples(PG_FUNCTION_ARGS)
 		{
 			MemoryContext old_ctx;
 
-			if (lvtt->mcxt)
-				old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
+			old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
 
 			attach(lvtt,
 				   DeadTuples_orig->dtinfo.nitems,
@@ -667,8 +670,7 @@ attach_dead_tuples(PG_FUNCTION_ARGS)
 				   DeadTuples_orig->dtinfo.maxblk,
 				   DeadTuples_orig->dtinfo.maxoff);
 
-			if (lvtt->mcxt)
-				MemoryContextSwitchTo(old_ctx);
+			MemoryContextSwitchTo(old_ctx);
 
 			break;
 		}
