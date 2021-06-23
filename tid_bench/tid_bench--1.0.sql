@@ -61,6 +61,7 @@ SELECT attach_dead_tuples('array');
 SELECT attach_dead_tuples('tbm');
 SELECT attach_dead_tuples('intset');
 SELECT attach_dead_tuples('dtstore');
+SELECT attach_dead_tuples('dtstore_r');
 END;
 
 CREATE FUNCTION tid_bench(
@@ -93,4 +94,9 @@ LANGUAGE C STRICT VOLATILE;
 --RETURNS text
 --AS 'MODULE_PATHNAME'
 --LANGUAGE C STRICT VOLATILE;
+
+CREATE FUNCTION dtstore_r_test()
+RETURNS text
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT VOLATILE;
 

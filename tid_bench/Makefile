@@ -2,7 +2,7 @@
 
 MODULE_big = tid_bench
 DATA = tid_bench--1.0.sql
-OBJS = tid_bench.o lvdeadtuple.o
+OBJS = tid_bench.o lvdeadtuple.o dtstore_r.o
 
 EXTENSION = tid_bench
 REGRESS= tid_bench

@@ -12,8 +12,8 @@ typedef struct DtEntry
 {
 	BlockNumber blkno;
 	char		status;
-	uint32		offset;
 	uint16		len;
+	uint32		offset;
 } DtEntry;
 
 #define SH_USE_NONDEFAULT_ALLOCATOR
@@ -186,10 +186,12 @@ dtstore_comparator(const void *left, const void *right)
 void
 dtstore_stats(DeadTupleStore *dtstore)
 {
-	elog(NOTICE, "dtatble_size %d bitmap_size %d npages %d",
+	elog(NOTICE, "dtatble_size %d bitmap_size %d npages %d, offset %d",
 		 dtstore->dttable_size,
 		 dtstore->bitmap_size,
-		 dtstore->npages);
+		 dtstore->npages,
+		 dtstore->curr_offset);
+	elog(NOTICE, "sizeof(DtEntry) %lu", sizeof(DtEntry));
 }
 
 void

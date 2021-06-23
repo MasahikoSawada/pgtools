@@ -18,6 +18,7 @@
 #include "utils/memutils.h"
 
 #include "lvdeadtuple.h"
+#include "dtstore_r.h"
 
 PG_MODULE_MAGIC;
 
@@ -85,6 +86,7 @@ PG_FUNCTION_INFO_V1(prepare_dead_tuples2_packed);
 PG_FUNCTION_INFO_V1(attach_dead_tuples);
 PG_FUNCTION_INFO_V1(tid_bench);
 PG_FUNCTION_INFO_V1(test_generate_tid);
+PG_FUNCTION_INFO_V1(dtstore_r_test);
 
 /*
 PG_FUNCTION_INFO_V1(tbm_test);
@@ -124,6 +126,13 @@ static void dtstore_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 static bool dtstore_reaped(LVTestType *lvtt, ItemPointer itemptr);
 static Size dtstore_mem_usage(LVTestType *lvtt);
 
+/* dtstore_r */
+static void dtstore_r_init(LVTestType *lvtt, uint64 nitems);
+static void dtstore_r_fini(LVTestType *lvtt);
+static void dtstore_r_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+						 BlockNumber maxblk, OffsetNumber maxoff);
+static bool dtstore_r_reaped(LVTestType *lvtt, ItemPointer itemptr);
+static Size dtstore_r_mem_usage(LVTestType *lvtt);
 
 /* Misc functions */
 static void generate_index_tuples(uint64 nitems, BlockNumber minblk,
@@ -137,6 +146,7 @@ static void attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk, BlockNum
 				   OffsetNumber maxoff);
 static int vac_cmp_itemptr(const void *left, const void *right);
 static void load_dtstore(DeadTupleStore *dtstore, ItemPointerData *itemptrs, int nitems);
+static void load_dtstore_r(DeadTupleStoreR *dtstore, ItemPointerData *itemptrs, int nitems);
 
 #define DECLARE_SUBJECT(n) \
 	{ \
@@ -148,13 +158,14 @@ static void load_dtstore(DeadTupleStore *dtstore, ItemPointerData *itemptrs, int
 		.mem_usage_fn = n##_mem_usage, \
 			}
 
-#define TEST_SUBJECT_TYPES 4
+#define TEST_SUBJECT_TYPES 5
 static LVTestType LVTestSubjects[TEST_SUBJECT_TYPES] =
 {
 	DECLARE_SUBJECT(array),
 	DECLARE_SUBJECT(tbm),
 	DECLARE_SUBJECT(intset),
 	DECLARE_SUBJECT(dtstore),
+	DECLARE_SUBJECT(dtstore_r),
 };
 
 static bool
@@ -365,7 +376,7 @@ tbm_init(LVTestType *lvtt, uint64 nitems)
 	MemoryContext old_ctx;
 
 	lvtt->mcxt = AllocSetContextCreate(TopMemoryContext,
-									   "array bench",
+									   "tbm bench",
 									   ALLOCSET_DEFAULT_SIZES);
 
 	old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
@@ -472,6 +483,7 @@ dtstore_reaped(LVTestType *lvtt, ItemPointer itemptr)
 static uint64
 dtstore_mem_usage(LVTestType *lvtt)
 {
+	dtstore_stats((DeadTupleStore *) lvtt->private);
 	return MemoryContextMemAllocated(lvtt->mcxt, true);
 }
 
@@ -501,6 +513,73 @@ load_dtstore(DeadTupleStore *dtstore, ItemPointerData *itemptrs, int nitems)
 	}
 
 	dtstore_add_tuples(dtstore, curblkno, offs, noffs);
+}
+
+/* ---------- DTSTORE_R ---------- */
+static void
+dtstore_r_init(LVTestType *lvtt, uint64 nitems)
+{
+	MemoryContext old_ctx;
+
+	lvtt->mcxt = AllocSetContextCreate(TopMemoryContext,
+									   "dtstore_r bench",
+									   ALLOCSET_DEFAULT_SIZES);
+	old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
+	lvtt->private = (void *) dtstore_r_create();
+	MemoryContextSwitchTo(old_ctx);
+}
+static void
+dtstore_r_fini(LVTestType *lvtt)
+{
+	if (lvtt->private)
+		dtstore_r_free((DeadTupleStoreR *) lvtt->private);
+}
+static void
+dtstore_r_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+			   BlockNumber maxblk, OffsetNumber maxoff)
+{
+	load_dtstore_r((DeadTupleStoreR *) lvtt->private,
+				   DeadTuples_orig->itemptrs,
+				   DeadTuples_orig->dtinfo.nitems);
+}
+static bool
+dtstore_r_reaped(LVTestType *lvtt, ItemPointer itemptr)
+{
+	return dtstore_r_lookup((DeadTupleStoreR *) lvtt->private, itemptr);
+}
+static uint64
+dtstore_r_mem_usage(LVTestType *lvtt)
+{
+	dtstore_r_stats((DeadTupleStoreR *) lvtt->private);
+	return MemoryContextMemAllocated(lvtt->mcxt, true);
+}
+
+static void
+load_dtstore_r(DeadTupleStoreR *dtstore, ItemPointerData *itemptrs, int nitems)
+{
+	BlockNumber curblkno = InvalidBlockNumber;
+	OffsetNumber offs[1024];
+	int noffs = 0;
+
+	for (int i = 0; i < nitems; i++)
+	{
+		ItemPointer tid = &(itemptrs[i]);
+		BlockNumber blkno = ItemPointerGetBlockNumber(tid);
+
+		if (curblkno != InvalidBlockNumber &&
+			curblkno != blkno)
+		{
+			dtstore_r_add_tuples(dtstore,
+							   curblkno, offs, noffs);
+			curblkno = blkno;
+			noffs = 0;
+		}
+
+		curblkno = blkno;
+		offs[noffs++] = ItemPointerGetOffsetNumber(tid);
+	}
+
+	dtstore_r_add_tuples(dtstore, curblkno, offs, noffs);
 }
 
 static void
@@ -774,6 +853,63 @@ test_generate_tid(PG_FUNCTION_ARGS)
 	elog(NOTICE, "%s", buf.data);
 
 	PG_RETURN_NULL();
+}
+
+Datum
+dtstore_r_test(PG_FUNCTION_ARGS)
+{
+	DeadTupleStoreR *dtstore = dtstore_r_create();
+	IntegerSet *intset = intset_create();
+	int matched_intset = 0, matched_dtstore = 0;
+	const int nitems_dead = 1000;
+	const int nitems_index = 10000;
+	ItemPointerData *dead_tuples =
+		(ItemPointer) MemoryContextAllocHuge(TopMemoryContext,
+											 sizeof(ItemPointerData) * nitems_dead);
+	ItemPointerData *index_tuples =
+		(ItemPointer) MemoryContextAllocHuge(TopMemoryContext,
+											 sizeof(ItemPointerData) * nitems_index);
+
+	generate_random_itemptrs(nitems_index, 0, 10000, 100, index_tuples);
+	generate_random_itemptrs(nitems_dead, 0, 1000, 100, dead_tuples);
+
+	for (int i = 0; i < nitems_dead; i++)
+		intset_add_member(intset, itemptr_encode(&dead_tuples[i]));
+	load_dtstore_r(dtstore, dead_tuples, nitems_dead);
+
+	for (int i = 0; i < nitems_index; i++)
+	{
+		bool ret1, ret2;
+
+		CHECK_FOR_INTERRUPTS();
+
+		ret1 = intset_is_member(intset, itemptr_encode(&(index_tuples[i])));
+		ret2 = dtstore_r_lookup(dtstore, &(index_tuples[i]));
+
+		if (i % 10000000 == 0)
+			elog(NOTICE, "%d done", i);
+
+		if (ret1 != ret2)
+		{
+			dtstore_r_dump_blk(dtstore, i);
+			elog(ERROR, "failed (%d, %d) : intset %d dtstore %d",
+				 ItemPointerGetBlockNumber(&(index_tuples[i])),
+				 ItemPointerGetOffsetNumber(&(index_tuples[i])),
+				 ret1, ret2);
+		}
+
+		if (ret1)
+			matched_intset++;
+		if (ret2)
+			matched_dtstore++;
+	}
+
+	dtstore_r_dump(dtstore);
+	elog(NOTICE, "matched intset %d dtstore %d",
+		 matched_intset,
+		 matched_dtstore);
+	PG_RETURN_NULL();
+
 }
 
 /*
