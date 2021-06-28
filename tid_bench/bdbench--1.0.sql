@@ -1,7 +1,7 @@
-/* tid_bench */
+/* bdbench */
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
-\echo Use "CREATE EXTENSION tid_bench" to load this file. \quit
+\echo Use "CREATE EXTENSION bdbench" to load this file. \quit
 
 -- default values simulate:
 -- * table has 1,000,000,000 tuples
@@ -73,7 +73,7 @@ SELECT attach_dead_tuples('dtstore');
 SELECT attach_dead_tuples('dtstore_r');
 END;
 
-CREATE FUNCTION tid_bench(
+CREATE FUNCTION bench(
 mode text default 'array')
 RETURNS text
 AS 'MODULE_PATHNAME'

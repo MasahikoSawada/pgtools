@@ -17,8 +17,8 @@
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 
-#include "lvdeadtuple.h"
-#include "dtstore_r.h"
+#include "vtbm.h"
+#include "rtbm.h"
 
 PG_MODULE_MAGIC;
 
@@ -86,12 +86,12 @@ PG_FUNCTION_INFO_V1(prepare_dead_tuples2_packed);
 PG_FUNCTION_INFO_V1(attach_dead_tuples);
 PG_FUNCTION_INFO_V1(tid_bench);
 PG_FUNCTION_INFO_V1(test_generate_tid);
-PG_FUNCTION_INFO_V1(dtstore_r_test);
+PG_FUNCTION_INFO_V1(rtbm_test);
 PG_FUNCTION_INFO_V1(prepare);
 
 /*
 PG_FUNCTION_INFO_V1(tbm_test);
-PG_FUNCTION_INFO_V1(dtstore_test);
+PG_FUNCTION_INFO_V1(vtbm_test);
 PG_FUNCTION_INFO_V1(itereate_bench);
 */
 
@@ -119,21 +119,21 @@ static void intset_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 static bool intset_reaped(LVTestType *lvtt, ItemPointer itemptr);
 static Size intset_mem_usage(LVTestType *lvtt);
 
-/* dtstore */
-static void dtstore_init(LVTestType *lvtt, uint64 nitems);
-static void dtstore_fini(LVTestType *lvtt);
-static void dtstore_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+/* vtbm */
+static void vtbm_init(LVTestType *lvtt, uint64 nitems);
+static void vtbm_fini(LVTestType *lvtt);
+static void vtbm_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 						 BlockNumber maxblk, OffsetNumber maxoff);
-static bool dtstore_reaped(LVTestType *lvtt, ItemPointer itemptr);
-static Size dtstore_mem_usage(LVTestType *lvtt);
+static bool vtbm_reaped(LVTestType *lvtt, ItemPointer itemptr);
+static Size vtbm_mem_usage(LVTestType *lvtt);
 
-/* dtstore_r */
-static void dtstore_r_init(LVTestType *lvtt, uint64 nitems);
-static void dtstore_r_fini(LVTestType *lvtt);
-static void dtstore_r_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+/* rtbm */
+static void rtbm_init(LVTestType *lvtt, uint64 nitems);
+static void rtbm_fini(LVTestType *lvtt);
+static void rtbm_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 						 BlockNumber maxblk, OffsetNumber maxoff);
-static bool dtstore_r_reaped(LVTestType *lvtt, ItemPointer itemptr);
-static Size dtstore_r_mem_usage(LVTestType *lvtt);
+static bool rtbm_reaped(LVTestType *lvtt, ItemPointer itemptr);
+static Size rtbm_mem_usage(LVTestType *lvtt);
 
 /* Misc functions */
 static void generate_index_tuples(uint64 nitems, BlockNumber minblk,
@@ -146,8 +146,8 @@ static void generate_random_itemptrs(uint64 nitems,
 static void attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk, BlockNumber maxblk,
 				   OffsetNumber maxoff);
 static int vac_cmp_itemptr(const void *left, const void *right);
-static void load_dtstore(DeadTupleStore *dtstore, ItemPointerData *itemptrs, int nitems);
-static void load_dtstore_r(DeadTupleStoreR *dtstore, ItemPointerData *itemptrs, int nitems);
+static void load_vtbm(VTbm *vtbm, ItemPointerData *itemptrs, int nitems);
+static void load_rtbm(RTbm *vtbm, ItemPointerData *itemptrs, int nitems);
 
 #define DECLARE_SUBJECT(n) \
 	{ \
@@ -165,8 +165,8 @@ static LVTestType LVTestSubjects[TEST_SUBJECT_TYPES] =
 	DECLARE_SUBJECT(array),
 	DECLARE_SUBJECT(tbm),
 	DECLARE_SUBJECT(intset),
-	DECLARE_SUBJECT(dtstore),
-	DECLARE_SUBJECT(dtstore_r),
+	DECLARE_SUBJECT(vtbm),
+	DECLARE_SUBJECT(rtbm),
 };
 
 static bool
@@ -450,47 +450,47 @@ intset_mem_usage(LVTestType *lvtt)
 	return intset_memory_usage((IntegerSet *) lvtt->private);
 }
 
-/* ---------- DTSTORE ---------- */
+/* ---------- VTBM ---------- */
 static void
-dtstore_init(LVTestType *lvtt, uint64 nitems)
+vtbm_init(LVTestType *lvtt, uint64 nitems)
 {
 	MemoryContext old_ctx;
 
 	lvtt->mcxt = AllocSetContextCreate(TopMemoryContext,
-									   "dtstore bench",
+									   "vtbm bench",
 									   ALLOCSET_DEFAULT_SIZES);
 	old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
-	lvtt->private = (void *) dtstore_create();
+	lvtt->private = (void *) vtbm_create();
 	MemoryContextSwitchTo(old_ctx);
 }
 static void
-dtstore_fini(LVTestType *lvtt)
+vtbm_fini(LVTestType *lvtt)
 {
 	if (lvtt->private)
-		dtstore_free((DeadTupleStore *) lvtt->private);
+		vtbm_free((VTbm *) lvtt->private);
 }
 static void
-dtstore_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+vtbm_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 			   BlockNumber maxblk, OffsetNumber maxoff)
 {
-	load_dtstore((DeadTupleStore *) lvtt->private,
+	load_vtbm((VTbm *) lvtt->private,
 				 DeadTuples_orig->itemptrs,
 				 DeadTuples_orig->dtinfo.nitems);
 }
 static bool
-dtstore_reaped(LVTestType *lvtt, ItemPointer itemptr)
+vtbm_reaped(LVTestType *lvtt, ItemPointer itemptr)
 {
-	return dtstore_lookup((DeadTupleStore *) lvtt->private, itemptr);
+	return vtbm_lookup((VTbm *) lvtt->private, itemptr);
 }
 static uint64
-dtstore_mem_usage(LVTestType *lvtt)
+vtbm_mem_usage(LVTestType *lvtt)
 {
-	dtstore_stats((DeadTupleStore *) lvtt->private);
+	vtbm_stats((VTbm *) lvtt->private);
 	return MemoryContextMemAllocated(lvtt->mcxt, true);
 }
 
 static void
-load_dtstore(DeadTupleStore *dtstore, ItemPointerData *itemptrs, int nitems)
+load_vtbm(VTbm *vtbm, ItemPointerData *itemptrs, int nitems)
 {
 	BlockNumber curblkno = InvalidBlockNumber;
 	OffsetNumber offs[1024];
@@ -504,7 +504,7 @@ load_dtstore(DeadTupleStore *dtstore, ItemPointerData *itemptrs, int nitems)
 		if (curblkno != InvalidBlockNumber &&
 			curblkno != blkno)
 		{
-			dtstore_add_tuples(dtstore,
+			vtbm_add_tuples(vtbm,
 							   curblkno, offs, noffs);
 			curblkno = blkno;
 			noffs = 0;
@@ -514,51 +514,51 @@ load_dtstore(DeadTupleStore *dtstore, ItemPointerData *itemptrs, int nitems)
 		offs[noffs++] = ItemPointerGetOffsetNumber(tid);
 	}
 
-	dtstore_add_tuples(dtstore, curblkno, offs, noffs);
+	vtbm_add_tuples(vtbm, curblkno, offs, noffs);
 }
 
-/* ---------- DTSTORE_R ---------- */
+/* ---------- RTBM ---------- */
 static void
-dtstore_r_init(LVTestType *lvtt, uint64 nitems)
+rtbm_init(LVTestType *lvtt, uint64 nitems)
 {
 	MemoryContext old_ctx;
 
 	lvtt->mcxt = AllocSetContextCreate(TopMemoryContext,
-									   "dtstore_r bench",
+									   "rtbm bench",
 									   ALLOCSET_DEFAULT_SIZES);
 	old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
-	lvtt->private = (void *) dtstore_r_create();
+	lvtt->private = (void *) rtbm_create();
 	MemoryContextSwitchTo(old_ctx);
 }
 static void
-dtstore_r_fini(LVTestType *lvtt)
+rtbm_fini(LVTestType *lvtt)
 {
 	if (lvtt->private)
-		dtstore_r_free((DeadTupleStoreR *) lvtt->private);
+		rtbm_free((RTbm *) lvtt->private);
 }
 static void
-dtstore_r_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+rtbm_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 			   BlockNumber maxblk, OffsetNumber maxoff)
 {
-	load_dtstore_r((DeadTupleStoreR *) lvtt->private,
+	load_rtbm((RTbm *) lvtt->private,
 				   DeadTuples_orig->itemptrs,
 				   DeadTuples_orig->dtinfo.nitems);
 }
 static bool
-dtstore_r_reaped(LVTestType *lvtt, ItemPointer itemptr)
+rtbm_reaped(LVTestType *lvtt, ItemPointer itemptr)
 {
-	return dtstore_r_lookup((DeadTupleStoreR *) lvtt->private, itemptr);
+	return rtbm_lookup((RTbm *) lvtt->private, itemptr);
 }
 static uint64
-dtstore_r_mem_usage(LVTestType *lvtt)
+rtbm_mem_usage(LVTestType *lvtt)
 {
-	//dtstore_r_dump((DeadTupleStoreR *) lvtt->private);
-	dtstore_r_stats((DeadTupleStoreR *) lvtt->private);
+	//rtbm_dump((RTbm *) lvtt->private);
+	rtbm_stats((RTbm *) lvtt->private);
 	return MemoryContextMemAllocated(lvtt->mcxt, true);
 }
 
 static void
-load_dtstore_r(DeadTupleStoreR *dtstore, ItemPointerData *itemptrs, int nitems)
+load_rtbm(RTbm *rtbm, ItemPointerData *itemptrs, int nitems)
 {
 	BlockNumber curblkno = InvalidBlockNumber;
 	OffsetNumber offs[1024];
@@ -572,7 +572,7 @@ load_dtstore_r(DeadTupleStoreR *dtstore, ItemPointerData *itemptrs, int nitems)
 		if (curblkno != InvalidBlockNumber &&
 			curblkno != blkno)
 		{
-			dtstore_r_add_tuples(dtstore,
+			rtbm_add_tuples(rtbm,
 							   curblkno, offs, noffs);
 			curblkno = blkno;
 			noffs = 0;
@@ -582,7 +582,7 @@ load_dtstore_r(DeadTupleStoreR *dtstore, ItemPointerData *itemptrs, int nitems)
 		offs[noffs++] = ItemPointerGetOffsetNumber(tid);
 	}
 
-	dtstore_r_add_tuples(dtstore, curblkno, offs, noffs);
+	rtbm_add_tuples(rtbm, curblkno, offs, noffs);
 }
 
 static void
@@ -868,11 +868,11 @@ test_generate_tid(PG_FUNCTION_ARGS)
 }
 
 Datum
-dtstore_r_test(PG_FUNCTION_ARGS)
+rtbm_test(PG_FUNCTION_ARGS)
 {
-	DeadTupleStoreR *dtstore = dtstore_r_create();
+	RTbm *rtbm = rtbm_create();
 	IntegerSet *intset = intset_create();
-	int matched_intset = 0, matched_dtstore = 0;
+	int matched_intset = 0, matched_rtbm = 0;
 	const int nitems_dead = 1000;
 	const int nitems_index = 10000;
 	ItemPointerData *dead_tuples =
@@ -887,7 +887,7 @@ dtstore_r_test(PG_FUNCTION_ARGS)
 
 	for (int i = 0; i < nitems_dead; i++)
 		intset_add_member(intset, itemptr_encode(&dead_tuples[i]));
-	load_dtstore_r(dtstore, dead_tuples, nitems_dead);
+	load_rtbm(rtbm, dead_tuples, nitems_dead);
 
 	for (int i = 0; i < nitems_index; i++)
 	{
@@ -896,15 +896,15 @@ dtstore_r_test(PG_FUNCTION_ARGS)
 		CHECK_FOR_INTERRUPTS();
 
 		ret1 = intset_is_member(intset, itemptr_encode(&(index_tuples[i])));
-		ret2 = dtstore_r_lookup(dtstore, &(index_tuples[i]));
+		ret2 = rtbm_lookup(rtbm, &(index_tuples[i]));
 
 		if (i % 10000000 == 0)
 			elog(NOTICE, "%d done", i);
 
 		if (ret1 != ret2)
 		{
-			dtstore_r_dump_blk(dtstore, i);
-			elog(ERROR, "failed (%d, %d) : intset %d dtstore %d",
+			rtbm_dump_blk(rtbm, i);
+			elog(ERROR, "failed (%d, %d) : intset %d rtbm %d",
 				 ItemPointerGetBlockNumber(&(index_tuples[i])),
 				 ItemPointerGetOffsetNumber(&(index_tuples[i])),
 				 ret1, ret2);
@@ -913,91 +913,13 @@ dtstore_r_test(PG_FUNCTION_ARGS)
 		if (ret1)
 			matched_intset++;
 		if (ret2)
-			matched_dtstore++;
+			matched_rtbm++;
 	}
 
-	dtstore_r_dump(dtstore);
-	elog(NOTICE, "matched intset %d dtstore %d",
+	rtbm_dump(rtbm);
+	elog(NOTICE, "matched intset %d rtbm %d",
 		 matched_intset,
-		 matched_dtstore);
+		 matched_rtbm);
 	PG_RETURN_NULL();
 
 }
-
-/*
-Datum
-dtstore_test(PG_FUNCTION_ARGS)
-{
-#define NITEMS_INDEX 1000000000
-#define NITEMS_DEAD 200000000
-
-	DeadTupleStore *dtstore = dtstore_create();
-	IntegerSet *intset = intset_create();
-	ItemPointerData *itemptrs =
-		(ItemPointer) MemoryContextAllocHuge(TopMemoryContext,
-											 sizeof(ItemPointerData) * NITEMS_DEAD);
-	ItemPointerData *indextups =
-		(ItemPointer) MemoryContextAllocHuge(TopMemoryContext,
-											 sizeof(ItemPointerData) * NITEMS_INDEX);
-	int matched_intset = 0, matched_dtstore = 0;
-
-	generate_random_itemptrs(NITEMS_INDEX, 0, 12817382, 81, indextups);
-	generate_random_itemptrs(NITEMS_DEAD, 0, 12817382, 81, itemptrs);
-
-	elog(NOTICE, "loading to intset...");
-	for (int i = 0; i < NITEMS_DEAD; i++)
-		intset_add_member(intset, itemptr_encode(&itemptrs[i]));
-
-	elog(NOTICE, "loading to dtstore...");
-	load_dtstore(dtstore, itemptrs, NITEMS_DEAD);
-
-	elog(NOTICE, "verifying...");
-	for (int i = 0; i < NITEMS_INDEX; i++)
-	{
-		bool ret1, ret2;
-
-		CHECK_FOR_INTERRUPTS();
-
-		ret1 = tid_reaped_intset(&(indextups[i]), intset);
-		ret2 = tid_reaped_dtstore(&(indextups[i]), dtstore);
-
-		if (i % 10000000 == 0)
-			elog(NOTICE, "%d done", i);
-
-		if (ret1 != ret2)
-		{
-			dtstore_dump_blk(dtstore, i);
-			elog(ERROR, "failed (%d, %d) : intset %d dtstore %d",
-				 ItemPointerGetBlockNumber(&(indextups[i])),
-				 ItemPointerGetOffsetNumber(&(indextups[i])),
-				 ret1, ret2);
-		}
-
-		if (ret1)
-			matched_intset++;
-		if (ret2)
-			matched_dtstore++;
-	}
-
-	elog(NOTICE, "matched intset %d dtstore %d",
-		 matched_intset,
-		 matched_dtstore);
-
-	PG_RETURN_NULL();
-}
-
-Datum
-tbm_test(PG_FUNCTION_ARGS)
-{
-	elog(NOTICE, "max entries %lu, sizeof(PagetableEntry) %lu sizeof(Pointer) %lu sizeof(bitmapword) %lu len %d MaxHeapTuplesPerPages %d, sizeof(HeapTupleHeaderData) %lu",
-		 tbm_calculate_entries(1024 * 1024 * 64),
-		 sizeof(PagetableEntry),
-		 sizeof(Pointer),
-		 sizeof(bitmapword),
-		 Max(WORDS_PER_PAGE, WORDS_PER_CHUNK),
-		 MaxHeapTuplesPerPage,
-		 sizeof(HeapTupleHeaderData));
-
-	PG_RETURN_NULL();
-}
-*/

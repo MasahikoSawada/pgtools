@@ -6,7 +6,7 @@
 #include "utils/memutils.h"
 #include "lib/stringinfo.h"
 
-#include "dtstore_r.h"
+#include "rtbm.h"
 
 #define DTENTRY_FLAGS_TYPE_ARRAY	0x1000
 #define DTENTRY_FLAGS_TYPE_BITMAP	0x2000
@@ -40,7 +40,7 @@ typedef struct DtEntry
 #define SH_DECLARE
 #include "lib/simplehash.h"
 
-typedef struct DeadTupleStoreR
+typedef struct RTbm
 {
 	struct dttable_hash *dttable;
 	int		dttable_size;
@@ -50,49 +50,48 @@ typedef struct DeadTupleStoreR
 	int		curr_offset;
 	char	*bitmap;
 	int		bitmap_size;
-} DeadTupleStoreR;
+} RTbm;
 
-#define DTSTORE_BITMAP_CHUNK_SIZE	(64 * 1024) /* 64kB */
-//#define DTSTORE_BITMAP_CHUNK_SIZE	(1024) /* 1kB */
+#define RTBM_BITMAP_INITIAL_SIZE	(64 * 1024) /* 64kB */
 
 #define WORDNUM(x) ((x) / 8)
 #define BITNUM(x) ((x) % 8)
 
-static void enlarge_space(DeadTupleStoreR *dtstore)
+static void enlarge_space(RTbm *rtbm)
 {
-	int newsize = dtstore->bitmap_size * 2;
+	int newsize = rtbm->bitmap_size * 2;
 	char *new = palloc0(newsize);
 
-	elog(NOTICE, "enlarge %d to %d", dtstore->bitmap_size, newsize);
+	elog(NOTICE, "enlarge %d to %d", rtbm->bitmap_size, newsize);
 
-	memcpy(new, dtstore->bitmap, dtstore->bitmap_size);
-	pfree(dtstore->bitmap);
-	dtstore->bitmap = new;
-	dtstore->bitmap_size = newsize;
+	memcpy(new, rtbm->bitmap, rtbm->bitmap_size);
+	pfree(rtbm->bitmap);
+	rtbm->bitmap = new;
+	rtbm->bitmap_size = newsize;
 }
 
-DeadTupleStoreR *
-dtstore_r_create(void)
+RTbm *
+rtbm_create(void)
 {
-	DeadTupleStoreR *dtstore = palloc0(sizeof(DeadTupleStoreR));
+	RTbm *rtbm = palloc0(sizeof(RTbm));
 
-	dtstore->dttable = dttable_create(CurrentMemoryContext, 128, (void *) dtstore);
+	rtbm->dttable = dttable_create(CurrentMemoryContext, 128, (void *) rtbm);
 
-	dtstore->bitmap = palloc0(DTSTORE_BITMAP_CHUNK_SIZE);
-	dtstore->bitmap_size = DTSTORE_BITMAP_CHUNK_SIZE;
+	rtbm->bitmap = palloc0(RTBM_BITMAP_INITIAL_SIZE);
+	rtbm->bitmap_size = RTBM_BITMAP_INITIAL_SIZE;
 
-	return dtstore;
+	return rtbm;
 }
 
 void
-dtstore_r_free(DeadTupleStoreR *dtstore)
+rtbm_free(RTbm *rtbm)
 {
-	pfree(dtstore->bitmap);
-	pfree(dtstore);
+	pfree(rtbm->bitmap);
+	pfree(rtbm);
 }
 
 void
-dtstore_r_add_tuples(DeadTupleStoreR *dtstore, const BlockNumber blkno,
+rtbm_add_tuples(RTbm *rtbm, const BlockNumber blkno,
 				   const OffsetNumber *offnums, int nitems)
 {
 	DtEntry *entry;
@@ -102,7 +101,7 @@ dtstore_r_add_tuples(DeadTupleStoreR *dtstore, const BlockNumber blkno,
 	int		array_size, bitmap_size;
 	OffsetNumber maxoff = FirstOffsetNumber;
 
-	entry = dttable_insert(dtstore->dttable, blkno, &found);
+	entry = dttable_insert(rtbm->dttable, blkno, &found);
 	Assert(found);
 
 	/* initialize entry */
@@ -110,7 +109,7 @@ dtstore_r_add_tuples(DeadTupleStoreR *dtstore, const BlockNumber blkno,
 	MemSet(entry, 0, sizeof(DtEntry));
 	entry->status = oldstatus;
 	entry->blkno = blkno;
-	entry->offset = dtstore->curr_offset;
+	entry->offset = rtbm->curr_offset;
 
 	/* get the highest offset number */
 	for (int i = 0; i < nitems; i++)
@@ -129,19 +128,19 @@ dtstore_r_add_tuples(DeadTupleStoreR *dtstore, const BlockNumber blkno,
 
 	if (array_size <= bitmap_size)
 	{
-		OffsetNumber *off_p = (OffsetNumber *) &(dtstore->bitmap[entry->offset]);
+		OffsetNumber *off_p = (OffsetNumber *) &(rtbm->bitmap[entry->offset]);
 
 		/* Go with array container */
 		entry->flags |= DTENTRY_FLAGS_TYPE_ARRAY;
 
-		if (dtstore->curr_offset >= dtstore->bitmap_size)
-			enlarge_space(dtstore);
+		if (rtbm->curr_offset >= rtbm->bitmap_size)
+			enlarge_space(rtbm);
 
 		for (int i = 0; i < nitems; i++)
 			*(off_p + i) = offnums[i];
 
 		entry->flags |= (((uint16) nitems) & DTENTRY_FLAGS_LEN_MASK);
-		dtstore->curr_offset += ((sizeof(OffsetNumber) * nitems) + 1);
+		rtbm->curr_offset += ((sizeof(OffsetNumber) * nitems) + 1);
 	}
 	else
 	{
@@ -155,21 +154,21 @@ dtstore_r_add_tuples(DeadTupleStoreR *dtstore, const BlockNumber blkno,
 			wordnum = WORDNUM(off - 1);
 			bitnum = BITNUM(off - 1);
 
-			if (wordnum + dtstore->curr_offset >= dtstore->bitmap_size)
-				enlarge_space(dtstore);
+			if (wordnum + rtbm->curr_offset >= rtbm->bitmap_size)
+				enlarge_space(rtbm);
 
-			dtstore->bitmap[entry->offset + wordnum] |= (1 << bitnum);
+			rtbm->bitmap[entry->offset + wordnum] |= (1 << bitnum);
 		}
 
 		entry->flags |= (((uint16) (wordnum + 1) * 8) & DTENTRY_FLAGS_LEN_MASK);
-		dtstore->curr_offset += (wordnum + 1);
+		rtbm->curr_offset += (wordnum + 1);
 	}
 
-	dtstore->npages++;
+	rtbm->npages++;
 }
 
 bool
-dtstore_r_lookup(DeadTupleStoreR *dtstore, ItemPointer tid)
+rtbm_lookup(RTbm *rtbm, ItemPointer tid)
 {
 	BlockNumber blk = ItemPointerGetBlockNumber(tid);
 	OffsetNumber off = ItemPointerGetOffsetNumber(tid);
@@ -178,7 +177,7 @@ dtstore_r_lookup(DeadTupleStoreR *dtstore, ItemPointer tid)
 	bool ret = false;
 	uint16 len;
 
-	entry = dttable_lookup(dtstore->dttable, blk);
+	entry = dttable_lookup(rtbm->dttable, blk);
 
 	if (!entry)
 		return false;
@@ -187,7 +186,7 @@ dtstore_r_lookup(DeadTupleStoreR *dtstore, ItemPointer tid)
 
 	if (DTENTRY_IS_ARRAY(entry))
 	{
-		OffsetNumber *off_p = (OffsetNumber *) &(dtstore->bitmap[entry->offset]);
+		OffsetNumber *off_p = (OffsetNumber *) &(rtbm->bitmap[entry->offset]);
 		ret = false;
 
 		for (int i = 0; i < len; i++)
@@ -208,7 +207,7 @@ dtstore_r_lookup(DeadTupleStoreR *dtstore, ItemPointer tid)
 			wordnum = WORDNUM(off - 1);
 			bitnum = BITNUM(off - 1);
 
-			ret = ((dtstore->bitmap[entry->offset + wordnum] & (1 << bitnum)) != 0);
+			ret = ((rtbm->bitmap[entry->offset + wordnum] & (1 << bitnum)) != 0);
 		}
 	}
 	else
@@ -220,9 +219,9 @@ dtstore_r_lookup(DeadTupleStoreR *dtstore, ItemPointer tid)
 static inline void *
 dttable_allocate(dttable_hash *dttable, Size size)
 {
-	DeadTupleStoreR *dtstore = (DeadTupleStoreR *) dttable->private_data;
+	RTbm *rtbm = (RTbm *) dttable->private_data;
 
-	dtstore->dttable_size = size;
+	rtbm->dttable_size = size;
 	return MemoryContextAllocExtended(dttable->ctx, size,
 									  MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
 }
@@ -234,7 +233,7 @@ dttable_free(dttable_hash *dttable, void *pointer)
 }
 
 static int
-dtstore_comparator(const void *left, const void *right)
+rtbm_comparator(const void *left, const void *right)
 {
 	BlockNumber l = (*((DtEntry *const *) left))->blkno;
 	BlockNumber r = (*((DtEntry *const *) right))->blkno;
@@ -247,18 +246,18 @@ dtstore_comparator(const void *left, const void *right)
 }
 
 void
-dtstore_r_stats(DeadTupleStoreR *dtstore)
+rtbm_stats(RTbm *rtbm)
 {
 	elog(NOTICE, "dtatble_size %d bitmap_size %d npages %d, offset %d",
-		 dtstore->dttable_size,
-		 dtstore->bitmap_size,
-		 dtstore->npages,
-		 dtstore->curr_offset);
+		 rtbm->dttable_size,
+		 rtbm->bitmap_size,
+		 rtbm->npages,
+		 rtbm->curr_offset);
 	elog(NOTICE, "sizeof(DtEntry) %lu", sizeof(DtEntry));
 }
 
 static void
-dump_entry(DeadTupleStoreR *dtstore, DtEntry *entry)
+dump_entry(RTbm *rtbm, DtEntry *entry)
 {
 	StringInfoData str;
 	uint16 len;
@@ -274,14 +273,14 @@ dump_entry(DeadTupleStoreR *dtstore, DtEntry *entry)
 
 	if (DTENTRY_IS_ARRAY(entry))
 	{
-		OffsetNumber *off_p = (OffsetNumber *) &(dtstore->bitmap[entry->offset]);
+		OffsetNumber *off_p = (OffsetNumber *) &(rtbm->bitmap[entry->offset]);
 
 		for (int i = 0; i < len; i++)
 			appendStringInfo(&str, "%d ", *(off_p + i));
 	}
 	else
 	{
-		char *bitmap = &(dtstore->bitmap[entry->offset]);
+		char *bitmap = &(rtbm->bitmap[entry->offset]);
 
 		for (int off = 0; off < len; off++)
 		{
@@ -300,33 +299,33 @@ dump_entry(DeadTupleStoreR *dtstore, DtEntry *entry)
 }
 
 void
-dtstore_r_dump(DeadTupleStoreR *dtstore)
+rtbm_dump(RTbm *rtbm)
 {
 	dttable_iterator iter;
 	DtEntry *entry;
 	DtEntry **entries;
 	int num = 0;
 
-	entries = (DtEntry **) palloc(dtstore->npages * sizeof(DtEntry *));
+	entries = (DtEntry **) palloc(rtbm->npages * sizeof(DtEntry *));
 
-	dttable_start_iterate(dtstore->dttable, &iter);
-	while ((entry = dttable_iterate(dtstore->dttable, &iter)) != NULL)
+	dttable_start_iterate(rtbm->dttable, &iter);
+	while ((entry = dttable_iterate(rtbm->dttable, &iter)) != NULL)
 		entries[num++] = entry;
 
-	qsort(entries, dtstore->npages, sizeof(DtEntry *), dtstore_comparator);
+	qsort(entries, rtbm->npages, sizeof(DtEntry *), rtbm_comparator);
 
 	elog(NOTICE, "DEADTUPLESTORE (bitmap size %d, npages %d) ----------------------------",
-		 dtstore->bitmap_size, dtstore->npages);
-	for (int i = 0; i < dtstore->npages; i++)
+		 rtbm->bitmap_size, rtbm->npages);
+	for (int i = 0; i < rtbm->npages; i++)
 	{
 		entry = entries[i];
 
-		dump_entry(dtstore, entry);
+		dump_entry(rtbm, entry);
 	}
 }
 
 void
-dtstore_r_dump_blk(DeadTupleStoreR *dtstore, BlockNumber blkno)
+rtbm_dump_blk(RTbm *rtbm, BlockNumber blkno)
 {
 	DtEntry *entry;
 	StringInfoData str;
@@ -334,8 +333,8 @@ dtstore_r_dump_blk(DeadTupleStoreR *dtstore, BlockNumber blkno)
 	initStringInfo(&str);
 
 	elog(NOTICE, "DEADTUPLESTORE (bitmap size %d, npages %d) ----------------------------",
-		 dtstore->bitmap_size, dtstore->npages);
-	entry = dttable_lookup(dtstore->dttable, blkno);
+		 rtbm->bitmap_size, rtbm->npages);
+	entry = dttable_lookup(rtbm->dttable, blkno);
 
 	if (!entry)
 	{
@@ -343,5 +342,5 @@ dtstore_r_dump_blk(DeadTupleStoreR *dtstore, BlockNumber blkno)
 		return;
 	}
 
-	dump_entry(dtstore, entry);
+	dump_entry(rtbm, entry);
 }
