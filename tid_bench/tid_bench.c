@@ -87,6 +87,7 @@ PG_FUNCTION_INFO_V1(attach_dead_tuples);
 PG_FUNCTION_INFO_V1(tid_bench);
 PG_FUNCTION_INFO_V1(test_generate_tid);
 PG_FUNCTION_INFO_V1(dtstore_r_test);
+PG_FUNCTION_INFO_V1(prepare);
 
 /*
 PG_FUNCTION_INFO_V1(tbm_test);
@@ -380,7 +381,7 @@ tbm_init(LVTestType *lvtt, uint64 nitems)
 									   ALLOCSET_DEFAULT_SIZES);
 
 	old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
-	lvtt->private = (void *) tbm_create(sizeof(ItemPointerData) * nitems, NULL);
+	lvtt->private = (void *) tbm_create(100 * nitems, NULL);
 	MemoryContextSwitchTo(old_ctx);
 }
 static void
@@ -406,6 +407,7 @@ tbm_reaped(LVTestType *lvtt, ItemPointer itemptr)
 static Size
 tbm_mem_usage(LVTestType *lvtt)
 {
+	tbm_stats((TIDBitmap *) lvtt->private);
 	return MemoryContextMemAllocated(lvtt->mcxt, true);
 }
 
@@ -550,6 +552,7 @@ dtstore_r_reaped(LVTestType *lvtt, ItemPointer itemptr)
 static uint64
 dtstore_r_mem_usage(LVTestType *lvtt)
 {
+	//dtstore_r_dump((DeadTupleStoreR *) lvtt->private);
 	dtstore_r_stats((DeadTupleStoreR *) lvtt->private);
 	return MemoryContextMemAllocated(lvtt->mcxt, true);
 }
@@ -729,6 +732,67 @@ prepare_dead_tuples2_packed(PG_FUNCTION_ARGS)
 }
 
 Datum
+prepare(PG_FUNCTION_ARGS)
+{
+	BlockNumber maxblk = PG_GETARG_INT64(0);
+	int dt_per_page = PG_GETARG_INT32(1);
+	int dt_interval_in_page = PG_GETARG_INT32(2);
+	int dt_interval = PG_GETARG_INT32(3);
+
+	OffsetNumber maxoff = ((dt_per_page - 1) * dt_interval_in_page) + 1;
+	int ndts = 0;
+	int nidx = 0;
+
+	DeadTuples_orig = MemoryContextAllocHuge(TopMemoryContext,
+											 sizeof(DeadTuplesArray));
+	DeadTuples_orig->itemptrs =
+		(ItemPointer) MemoryContextAllocHuge(TopMemoryContext,
+											 sizeof(ItemPointerData) *
+											 ((((uint64) maxblk / dt_interval) * (dt_per_page))) * 1.05);
+
+	IndexTids_cache = MemoryContextAllocHuge(TopMemoryContext,
+											 sizeof(DeadTuplesArray));
+	IndexTids_cache->itemptrs =
+		(ItemPointer) MemoryContextAllocHuge(TopMemoryContext,
+											 sizeof(ItemPointerData) *
+											 (((uint64) maxblk * (maxoff))) * 1.05);
+
+	elog(NOTICE, "dead tuples: total %d, %d tuples with interval %d in page (maxoff %u)",
+		 ((maxblk / dt_interval) * (dt_per_page)),
+		 dt_per_page,
+		 dt_interval_in_page,
+		 maxoff);
+	for (BlockNumber blkno = 0; blkno < maxblk; blkno++)
+	{
+		int ndt_per_page = 0;
+
+		for (OffsetNumber off = 1; off <= (maxoff); off++)
+		{
+			ItemPointerData tid;
+
+			ItemPointerSetBlockNumber(&tid, blkno);
+			ItemPointerSetOffsetNumber(&tid, off);
+
+			if (blkno % dt_interval == 0 &&
+				(off) % dt_interval_in_page == 1 &&
+				ndt_per_page <= dt_per_page)
+			{
+				if (blkno == 0)
+					elog(NOTICE, "(%d, %d)", blkno, off);
+				DeadTuples_orig->itemptrs[ndts++] = tid;
+			}
+
+			IndexTids_cache->itemptrs[nidx++] = tid;
+		}
+	}
+
+	DeadTuples_orig->dtinfo.nitems = ndts;
+	IndexTids_cache->dtinfo.nitems = nidx;
+
+	PG_RETURN_NULL();
+}
+
+Datum
 attach_dead_tuples(PG_FUNCTION_ARGS)
 {
 	char *mode = text_to_cstring(PG_GETARG_TEXT_P(0));
@@ -778,58 +842,6 @@ tid_bench(PG_FUNCTION_ARGS)
 
 	PG_RETURN_NULL();
 }
-
-/*
-Datum
-itereate_bench(PG_FUNCTION_ARGS)
-{
-	char *mode = text_to_cstring(PG_GETARG_TEXT_P(0));
-	int cnt = 0;
-
-	if (strcmp(mode, "array") == 0)
-	{
-		if (!DeadTuples_array || !DeadTuples_array->itemptrs)
-			elog(ERROR, "ARRAY dead tuples are not preapred");
-
-		for (int i = 0; i < DeadTuples_array->dtinfo.nitems; i++)
-			cnt++;
-
-	}
-	else if (strcmp(mode, "tbm") == 0)
-	{
-		TBMIterator *iter;
-		TBMIterateResult *res;
-
-		if (!DeadTuples_tbm || !DeadTuples_tbm->tbm)
-			elog(ERROR, "TBM dead tuples are not preapred");
-
-		iter = tbm_begin_iterate(DeadTuples_tbm->tbm);
-
-		while ((res = tbm_iterate(iter)) != NULL)
-		{
-			for (int i = 0; i < res->ntuples; i++)
-				cnt++;
-		}
-
-		tbm_end_iterate(iter);
-	}
-	else if (strcmp(mode, "intset") == 0)
-	{
-		uint64 next;
-		if (!DeadTuples_intset || !DeadTuples_intset->intset)
-			elog(ERROR, "INTSET dead tuples are not preapred");
-
-		intset_begin_iterate(DeadTuples_intset->intset);
-
-		while (intset_iterate_next(DeadTuples_intset->intset, &next))
-			cnt++;
-	}
-
-	elog(NOTICE, "count %d", cnt);
-
-	PG_RETURN_NULL();
-}
-*/
 
 Datum
 test_generate_tid(PG_FUNCTION_ARGS)

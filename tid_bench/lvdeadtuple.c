@@ -40,7 +40,7 @@ typedef struct DeadTupleStore
 	int		bitmap_size;
 } DeadTupleStore;
 
-#define DTSTORE_BITMAP_CHUNK_SIZE	(8 * 1024  * 1024) /* 8MB */
+#define DTSTORE_BITMAP_CHUNK_SIZE	(64 * 1024) /* 64kB */
 //#define DTSTORE_BITMAP_CHUNK_SIZE	(1024) /* 1kB */
 
 #define WORDNUM(x) ((x) / 8)
@@ -95,7 +95,7 @@ dtstore_add_tuples(DeadTupleStore *dtstore, const BlockNumber blkno,
 		/* enlarge bitmap space */
 		if (wordnum + dtstore->curr_offset >= dtstore->bitmap_size)
 		{
-			int newsize = dtstore->bitmap_size + DTSTORE_BITMAP_CHUNK_SIZE;
+			int newsize = dtstore->bitmap_size * 2;
 			char *new = palloc0(newsize);
 
 			elog(NOTICE, "enlarge %d to %d", dtstore->bitmap_size, newsize);

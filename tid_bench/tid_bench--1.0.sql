@@ -41,6 +41,15 @@ RETURNS text
 AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT VOLATILE;
 
+CREATE FUNCTION prepare(
+maxblk bigint,
+dt_per_page int,
+dt_interval_in_page int,
+dt_interval int)
+RETURNS text
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT VOLATILE;
+
 CREATE FUNCTION prepare_dead_tuples2_packed(
 ntuples bigint default 1000000000,
 tuple_size int default 100,

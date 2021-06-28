@@ -52,7 +52,7 @@ typedef struct DeadTupleStoreR
 	int		bitmap_size;
 } DeadTupleStoreR;
 
-#define DTSTORE_BITMAP_CHUNK_SIZE	(8 * 1024  * 1024) /* 8MB */
+#define DTSTORE_BITMAP_CHUNK_SIZE	(64 * 1024) /* 64kB */
 //#define DTSTORE_BITMAP_CHUNK_SIZE	(1024) /* 1kB */
 
 #define WORDNUM(x) ((x) / 8)
@@ -60,7 +60,7 @@ typedef struct DeadTupleStoreR
 
 static void enlarge_space(DeadTupleStoreR *dtstore)
 {
-	int newsize = dtstore->bitmap_size + DTSTORE_BITMAP_CHUNK_SIZE;
+	int newsize = dtstore->bitmap_size * 2;
 	char *new = palloc0(newsize);
 
 	elog(NOTICE, "enlarge %d to %d", dtstore->bitmap_size, newsize);
@@ -103,7 +103,7 @@ dtstore_r_add_tuples(DeadTupleStoreR *dtstore, const BlockNumber blkno,
 	OffsetNumber maxoff = FirstOffsetNumber;
 
 	entry = dttable_insert(dtstore->dttable, blkno, &found);
-	Assert(!found);
+	Assert(found);
 
 	/* initialize entry */
 	oldstatus = entry->status;
@@ -215,24 +215,6 @@ dtstore_r_lookup(DeadTupleStoreR *dtstore, ItemPointer tid)
 		elog(ERROR, "invalid container type");
 
 	return ret;
-
-	/*
-	fprintf(stderr, "LOOKUP (%d,%d) WORD %d BIT %d\n",
-			blk, off,
-			wordnum, bitnum);
-	for (int i = 0; i < entry->len / 8; i++)
-		fprintf(stderr, "%02X",
-				dtstore->bitmap[entry->offset + i] & 0x000000FF);
-//		fprintf(stderr, "%s",
-//				dtstore->bitmap[entry->offset + i % 8] & ((char) 1 << i) ? "1" : "0");
-	fprintf(stderr, "\n");
-	fprintf(stderr, "%02X %02X -> %d\n",
-			dtstore->bitmap[entry->offset + wordnum]& 0x000000FF,
-			(1 << bitnum) & 0x000000FF,
-			dtstore->bitmap[entry->offset + wordnum] & (1 << bitnum));
-	fflush(stderr);
-	*/
-
 }
 
 static inline void *
