@@ -1,6 +1,6 @@
 /* -------------------------------------------------------------------------
  *
- * tid_bench.c
+ * bdbench.c
  *
  * -------------------------------------------------------------------------
  */
@@ -84,7 +84,7 @@ PG_FUNCTION_INFO_V1(prepare_index_tuples2);
 PG_FUNCTION_INFO_V1(prepare_dead_tuples2);
 PG_FUNCTION_INFO_V1(prepare_dead_tuples2_packed);
 PG_FUNCTION_INFO_V1(attach_dead_tuples);
-PG_FUNCTION_INFO_V1(tid_bench);
+PG_FUNCTION_INFO_V1(bench);
 PG_FUNCTION_INFO_V1(test_generate_tid);
 PG_FUNCTION_INFO_V1(rtbm_test);
 PG_FUNCTION_INFO_V1(prepare);
@@ -618,7 +618,7 @@ attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk, BlockNumber maxblk,
 }
 
 static void
-bench(LVTestType *lvtt)
+_bench(LVTestType *lvtt)
 {
 	int matched = 0;
 	MemoryContext old_ctx;
@@ -740,8 +740,8 @@ prepare(PG_FUNCTION_ARGS)
 	int dt_interval = PG_GETARG_INT32(3);
 
 	OffsetNumber maxoff = ((dt_per_page - 1) * dt_interval_in_page) + 1;
-	int ndts = 0;
-	int nidx = 0;
+	uint64 ndts = 0;
+	uint64 nidx = 0;
 
 	DeadTuples_orig = MemoryContextAllocHuge(TopMemoryContext,
 											 sizeof(DeadTuplesArray));
@@ -776,11 +776,7 @@ prepare(PG_FUNCTION_ARGS)
 			if (blkno % dt_interval == 0 &&
 				(off) % dt_interval_in_page == 1 &&
 				ndt_per_page <= dt_per_page)
-			{
-				if (blkno == 0)
-					elog(NOTICE, "(%d, %d)", blkno, off);
 				DeadTuples_orig->itemptrs[ndts++] = tid;
-			}
 
 			IndexTids_cache->itemptrs[nidx++] = tid;
 		}
@@ -823,7 +819,7 @@ attach_dead_tuples(PG_FUNCTION_ARGS)
 }
 
 Datum
-tid_bench(PG_FUNCTION_ARGS)
+bench(PG_FUNCTION_ARGS)
 {
 	char *mode = text_to_cstring(PG_GETARG_TEXT_P(0));
 
@@ -835,7 +831,7 @@ tid_bench(PG_FUNCTION_ARGS)
 		LVTestType *lvtt = &(LVTestSubjects[i]);
 		if (strcmp(mode, lvtt->name) == 0)
 		{
-			bench(lvtt);
+			_bench(lvtt);
 			break;
 		}
 	}

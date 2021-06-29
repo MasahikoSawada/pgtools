@@ -97,7 +97,7 @@ vtbm_add_tuples(VTbm *vtbm, const BlockNumber blkno,
 			int newsize = vtbm->bitmap_size * 2;
 			char *new = palloc0(newsize);
 
-			elog(NOTICE, "enlarge %d to %d", vtbm->bitmap_size, newsize);
+			//elog(NOTICE, "enlarge %d to %d", vtbm->bitmap_size, newsize);
 
 			memcpy(new, vtbm->bitmap, vtbm->bitmap_size);
 			pfree(vtbm->bitmap);

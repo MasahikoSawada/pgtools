@@ -1,5 +1,5 @@
-# tid_bench extension
+# bdbench extension
 comment = 'micro benchmark for tid storing/lookup'
 default_version = '1.0'
-module_pathname = '$libdir/tid_bench'
+module_pathname = '$libdir/bdbench'
 relocatable = on

@@ -1,10 +1,10 @@
 # bdbench (Benchmark for index bulk-deletion)
 
-Lazy vacuum's index bulk-deletion operation is essentially an existence check. For each index tuples, we check if there is its (heap) TID in the dead tuple TID collected during heap scan. The memory space is limited by maintenance_work_mem, 64MB by default. If we collect dead tuple more than the limit, we suspend the heap scan, invoke both index vacuuming and heap vacuuming, and then resume the heap scan. Since index bulk-deletion is usually implemented as a whole index scan it would be advisable to avoid doing it more than once.
+Lazy vacuum's index bulk-deletion operation is essentially an existence check. For each TID that index tuple points to, we check if there is dead tuple TID corrected during heap scan. The memory space to store the dead tuples is limited by maintenance_work_mem, 64MB by default. If we collect dead tuple more than the limit, we suspend the heap scan, invoke both index vacuuming and heap vacuuming, and then resume the heap scan. Since index bulk-deletion is usually implemented as a whole index scan it would be advisable to avoid doing it more than once.
 
-There are two important factors here: memory usage and lookup performance. Both are related to the bulk-deletion performance. The latter is obvious while the former contributes to the number of index vacuuming in a lazy vacuum.
+In terms of index vacuum performance, there are two important factors: performance of lookup within the dead tuple and memory usage. The former is obvious while the latter contributes to the number of index vacuuming in a lazy vacuum.
 
-As of the current implementation, we use a simple flat array to store dead tuple TIDs and lookup a TID by `bsearch()`. There are known limitations and problems:
+As of the current implementation, we use a simple flat array to store dead tuple TIDs and lookup a TID by bsearch(). There are known limitations and problems:
 
 * Cannot allocate more than 1GB.
   * There was a discussion to eliminate this limitation by using `MemoryContextAllocHuge()` but was rejected because of the following two points.
@@ -12,6 +12,8 @@ As of the current implementation, we use a simple flat array to store dead tuple
 * Slow performance (O(logN)).
 
 This tool is aimed to do micro benchmark for index bulk-deletion with various types of data structure.
+
+I’d like to share some experiments on those area and discuss possible improvement.
 
 ## Installation
 
@@ -70,26 +72,49 @@ I've considered to integrate either `vtbm` or `rtbm` with `TIDBitmap` but it see
 
 ## Benchmark
 
+**All TIDs used as index tuples and dead tuples and the data structure are allocated in `TopMemoryContext`, lasting until the proc exit. Therefore, please note that the following steps must be executed in the same connection, the same backend process.**
+
+### Preparation
+
 1. Generate index tuple TIDs and dead tuple TIDs
 
 ```sql
-select prepare(x, x, x, x);
+select prepare(100000000, 12, 5, 10);
 ```
 
-All TIDs are allocated in `TopMemoryContext`, lasting until the proc exit.
+`prepare()` SQL function generates TIDs on memory, simulating dead tuples and index tuples. In the above example, it generates `12` dead tuples per block with `5` offset interval in blocks with `10` block interval, generating `100000000` in total.
+
+### Evaluate the loading performance
 
 2. Load dead tuple TIDs to the specific method
 
 ```sql
-select attach_dead_tuples('array');
+select attach_dead_tuples('rtbm');
 ```
 
 The argument can be one of the supported methods.
 
-3. Do benchmark
+## Evaluate the lookup performance
 
 ```sql
 \timing on
-select bench('array');
+select bench('rtbm');
+ bench
+-------
+
+(1 row)
+Time: 38685.140 ms (00:38.685)
 ```
 
+The argument can be one of the supported methods.
+
+## Chcek memory usage
+
+```sql
+select * from pg_backend_memory_contexts where name ~ 'bench' or name = 'TopMemoryContext' order by name;
+       name       | ident |      parent      | level | total_bytes | total_nblocks | free_bytes | free_chunks | used_bytes
+------------------+-------+------------------+-------+-------------+---------------+------------+-------------+-------------
+ TopMemoryContext |       |                  |     0 | 36036068816 |             7 |      12952 |           5 | 36036055864
+ rtbm bench       |       | TopMemoryContext |     1 |   335569008 |             4 |      24112 |           6 |   335544896
+(2 rows)
+```
