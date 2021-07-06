@@ -192,7 +192,7 @@ create_run_container(const OffsetNumber *offnums, int noffs, uint16 *container)
 		container[coffset++] = length;
 	}
 
-	return (coffset * sizeof(uint16));
+	return (int) (coffset * sizeof(uint16));
 }
 
 /*
@@ -205,23 +205,23 @@ choose_container_type(const OffsetNumber *offnums, int noffs, int *size_p,
 					  uint16 *runcontainer)
 {
 	int		array_size;
-	int 	containerdata_size;
+	int 	bitmap_size;
 	int		run_size;
 
 	/* calculate the space needed by each container type in byte */
 	array_size = noffs * sizeof(OffsetNumber);
-	containerdata_size = BITMAP_CONTAINER_SIZE(offnums[noffs - 1]);
+	bitmap_size = BITMAP_CONTAINER_SIZE(offnums[noffs - 1]);
 	run_size = create_run_container(offnums, noffs, runcontainer);
 
-	if (containerdata_size <= array_size && containerdata_size <= run_size)
+	if (bitmap_size <= array_size && bitmap_size <= run_size)
 	{
-		*size_p = containerdata_size;
-		return DTENTRY_FLAG_TYPE_RUN;
+		*size_p = bitmap_size;
+		return DTENTRY_FLAG_TYPE_BITMAP;
 	}
-	else if (run_size < containerdata_size && run_size < array_size)
+	else if (run_size < bitmap_size && run_size < array_size)
 	{
 		*size_p = run_size;
-		return DTENTRY_FLAG_TYPE_BITMAP;
+		return DTENTRY_FLAG_TYPE_RUN;
 	}
 	else
 	{
@@ -237,7 +237,7 @@ rtbm_add_tuples(RTbm *rtbm, const BlockNumber blkno,
 	DtEntry *entry;
 	bool	found;
 	char	oldstatus;
-	OffsetNumber runcontainer[MaxHeapTuplesPerPage + 1];
+	OffsetNumber runcontainer[MaxHeapTuplesPerPage];
 	int container_type;
 	int container_size;
 
@@ -254,7 +254,6 @@ rtbm_add_tuples(RTbm *rtbm, const BlockNumber blkno,
 	/* Choose smallest container type */
 	container_type = choose_container_type(offnums, nitems, &container_size,
 										   runcontainer);
-
 	/* Make sure we have enough container data space */
 	if ((rtbm->offset + container_size) > rtbm->containerdata_size)
 	{
@@ -288,6 +287,7 @@ rtbm_add_tuples(RTbm *rtbm, const BlockNumber blkno,
 		/* Copy already-created run container */
 		memcpy(&(rtbm->containerdata[entry->offset]), runcontainer,
 			   container_size);
+		//memcpy(container, runcontainer, container_size);
 
 		entry->flags |= DTENTRY_FLAG_TYPE_RUN;
 
@@ -403,7 +403,6 @@ rtbm_stats(RTbm *rtbm)
 		 rtbm->containerdata_size,
 		 rtbm->nblocks,
 		 rtbm->offset);
-	elog(NOTICE, "sizeof(DtEntry) %lu", sizeof(DtEntry));
 }
 
 static void
@@ -457,6 +456,19 @@ dump_entry(RTbm *rtbm, DtEntry *entry)
 	elog(NOTICE, "%s (offset %d len %d)",
 		 str.data,
 		 entry->offset, len);
+}
+
+static int
+rtbm_comparator(const void *left, const void *right)
+{
+   BlockNumber l = (*((DtEntry *const *) left))->blkno;
+   BlockNumber r = (*((DtEntry *const *) right))->blkno;
+
+   if (l < r)
+	   return -1;
+   else if (l > r)
+	   return 1;
+   return 0;
 }
 
 void

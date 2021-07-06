@@ -554,10 +554,6 @@ rtbm_reaped(LVTestType *lvtt, ItemPointer itemptr)
 static uint64
 rtbm_mem_usage(LVTestType *lvtt)
 {
-	rtbm_dump_blk((RTbm *) lvtt->private, 0);
-	rtbm_dump_blk((RTbm *) lvtt->private, 1);
-	rtbm_dump_blk((RTbm *) lvtt->private, 3120);
-	rtbm_dump_blk((RTbm *) lvtt->private, 3121);
 	rtbm_stats((RTbm *) lvtt->private);
 	return MemoryContextMemAllocated(lvtt->mcxt, true);
 }
