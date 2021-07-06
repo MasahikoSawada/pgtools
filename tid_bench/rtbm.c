@@ -1,3 +1,68 @@
+/*-------------------------------------------------------------------------
+ *
+ * rtbm.c (Vacuum TID Map)
+ *		Data structure to hold TIDs of dead tuples during vacuum.
+ *
+ * Vacuum TID map is used to hold the TIDs of dead tuple during lazy vacuum.
+ * This module is based on the paper "Consistently faster and smaller
+ * compressed bitmaps with Roaring" by D. Lemire, G. Ssi-Yan-Kai, O. Kaser,
+ * arXiv:1603.06549, [cs.DB], 2 Mar 2018.
+ *
+ * The authors provide an implementation of Roaring Bitmap at
+ * https://github.com/RoaringBitmap/CRoaring (Apache 2.0 license). Even if
+ * it were practical to use this library directly, we cannot because we need
+ * to integrate it with Dynamic Shared Memory/Area to support parallel vacuum
+ * and need to support ItemPointerData, 6-byte integer in total, whereas the
+ * implementation supports only 4-byte integers. Also, for vacuum purpose,
+ * we neither need to compute the intersection, the union, nor the difference
+ * between sets, but need only an existence check.
+ *
+ * Therefore, this code was written from scratch while begin inspired by the
+ * idea of Roaring Bitmap.  The data structure is similar to TIDBitmap with some
+ * exceptions.  It consists of a hash table managing entries per block and a
+ * variable-lenth array that is commonly used by block entries. Each block
+ * entry has its container storing offsets of dead tuples and its length. There
+ * are three types of container: array, bitmap, and run.
+
+ * - An array container is object containing 2-byte integers representing offset
+ * numbers. The corresponding block entry has the number of 2-byte integers
+ * (OffsetNumber) as its length.
+ *
+ * - A bitmap container is an object representing an uncompressed bitmap, able
+ * to store all OffsetNumbers at maximum. The corresponding block entry has the
+ * number of bits as its length.
+ *
+ * - A run container is an object made of an array of pairs of 2-byte integers.
+ * The first value of each pair represents a starting OffsetNumber whereas the
+ * second value represents the length.  The corresponding block entry has the
+ * number of 2-byte integers as its length.
+ *
+ * The smallest container type varies depending on the cardinarity of the offset
+ * numbers in the block.
+ *
+ * Limitations
+ * -----------
+ * - No support for removing and updating block and offset values.
+ *
+ * - Offset numbers must be added in order.
+ *
+ * - No computation of the intersection, the union, and the difference of
+ *   between sets.
+ *
+ * TODO
+ * ----
+ * - Support iteration.
+ *
+ * - Support DSM and DSA.
+ *
+ * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1994, Regents of the University of California
+ *
+ * IDENTIFICATION
+ *	  src/backend/access/heap/vacuumtidmap.c
+ *
+ *-------------------------------------------------------------------------
+ */
 #include "postgres.h"
 
 #include "access/htup_details.h"
@@ -8,25 +73,38 @@
 
 #include "rtbm.h"
 
-#define DTENTRY_FLAGS_TYPE_ARRAY	0x1000
-#define DTENTRY_FLAGS_TYPE_BITMAP	0x2000
-#define DTENTRY_FLAGS_TYPE_RUN		0x4000
-#define DTENTRY_FLAGS_LEN_MASK		0x0FFF
+/*
+ * The lowest 4 bits are used by the type of the container. The remainig
+ * 12 bits represent the length. 12 bits is enough for the the number of
+ * elements in the container. In the array container case, we need
+ * MaxHeapTuplePerPage (typically 256 with 8K pages, or 1024 with 32K pages)
+ * 2-byte integers in the array container, in the bitmap container case,
+ * we need MaxHeapTuplePerPage bits, and in the run container case, we
+ * need MaxHeapTuplePerPage pairs of 2-byte integers.
+ */
+#define DTENTRY_FLAG_TYPE_ARRAY	0x1000
+#define DTENTRY_FLAG_TYPE_BITMAP	0x2000
+#define DTENTRY_FLAG_TYPE_RUN		0x4000
+#define DTENTRY_FLAG_NUM_MASK		0x0FFF
 
 typedef struct DtEntry
 {
-	BlockNumber blkno;
-	char		status;
-	uint16		flags;
-	uint32		offset;
+	BlockNumber blkno; /* block number (hash table key) */
+	char		status; /* hash entry status */
+	uint16		flags; /* type of the container and the number of elements
+						* in the container */
+	uint32		offset; /* start offset within the containerdata */
 } DtEntry;
 
 #define DTENTRY_IS_ARRAY(entry) \
-	((((DtEntry *) (entry))->flags & DTENTRY_FLAGS_TYPE_ARRAY) != 0)
+	((((DtEntry *) (entry))->flags & DTENTRY_FLAG_TYPE_ARRAY) != 0)
 #define DTENTRY_IS_BITMAP(entry) \
-	((((DtEntry *) (entry))->flags & DTENTRY_FLAGS_TYPE_BITMAP) != 0)
+	((((DtEntry *) (entry))->flags & DTENTRY_FLAG_TYPE_BITMAP) != 0)
 #define DTENTRY_IS_RUN(entry) \
-	((((DtEntry *) (entry))->flags & DTENTRY_FLAGS_TYPE_RUN) != 0)
+	((((DtEntry *) (entry))->flags & DTENTRY_FLAG_TYPE_RUN) != 0)
+
+#define BITMAP_CONTAINER_SIZE(maxoff) (((maxoff) - 1) / BITBYTE + 1)
+#define MAX_BITMAP_CONTAINER_SIZE BITMAP_CONTAINER_SIZE(MaxHeapTuplesPerPage)
 
 #define SH_USE_NONDEFAULT_ALLOCATOR
 #define SH_PREFIX dttable
@@ -45,29 +123,27 @@ typedef struct RTbm
 	struct dttable_hash *dttable;
 	int		dttable_size;
 
-	int		npages;
+	int		nblocks;
 
-	int		curr_offset;
-	char	*bitmap;
-	int		bitmap_size;
+	char	*containerdata;	/* the space for containers */
+	uint64	containerdata_size;
+	uint32	offset;	/* current offset within the containerdata */
 } RTbm;
+#define RTBM_CONTAINERDATA_INITIAL_SIZE	(64 * 1024) /* 64kB */
 
-#define RTBM_BITMAP_INITIAL_SIZE	(64 * 1024) /* 64kB */
-
-#define WORDNUM(x) ((x) / 8)
+#define BITBYTE 8
+#define BYTENUM(x) ((x) / 8)
 #define BITNUM(x) ((x) % 8)
 
-static void enlarge_space(RTbm *rtbm)
+static void enlarge_container_space(RTbm *rtbm)
 {
-	int newsize = rtbm->bitmap_size * 2;
+	int newsize = rtbm->containerdata_size * 2;
 	char *new = palloc0(newsize);
 
-	elog(NOTICE, "enlarge %d to %d", rtbm->bitmap_size, newsize);
-
-	memcpy(new, rtbm->bitmap, rtbm->bitmap_size);
-	pfree(rtbm->bitmap);
-	rtbm->bitmap = new;
-	rtbm->bitmap_size = newsize;
+	memcpy(new, rtbm->containerdata, rtbm->containerdata_size);
+	pfree(rtbm->containerdata);
+	rtbm->containerdata = new;
+	rtbm->containerdata_size = newsize;
 }
 
 RTbm *
@@ -77,8 +153,8 @@ rtbm_create(void)
 
 	rtbm->dttable = dttable_create(CurrentMemoryContext, 128, (void *) rtbm);
 
-	rtbm->bitmap = palloc0(RTBM_BITMAP_INITIAL_SIZE);
-	rtbm->bitmap_size = RTBM_BITMAP_INITIAL_SIZE;
+	rtbm->containerdata = palloc0(RTBM_CONTAINERDATA_INITIAL_SIZE);
+	rtbm->containerdata_size = RTBM_CONTAINERDATA_INITIAL_SIZE;
 
 	return rtbm;
 }
@@ -86,8 +162,72 @@ rtbm_create(void)
 void
 rtbm_free(RTbm *rtbm)
 {
-	pfree(rtbm->bitmap);
+	pfree(rtbm->containerdata);
 	pfree(rtbm);
+}
+
+/*
+ * Create a run container into *container. Return the container
+ * size in bytes.
+ */
+static int
+create_run_container(const OffsetNumber *offnums, int noffs, uint16 *container)
+{
+	OffsetNumber startoff;
+	uint16	length;
+	int		coffset = 0;
+
+	for (int i = 1; i <= noffs; i++)
+	{
+		length = 1;
+		startoff = offnums[i - 1];
+
+		while (i <= noffs && offnums[i - 1] + 1 == offnums[i])
+		{
+			length++;
+			i++;
+		}
+
+		container[coffset++] = startoff;
+		container[coffset++] = length;
+	}
+
+	return (coffset * sizeof(uint16));
+}
+
+/*
+ * Choose the smallest size of container type. We cannot know how big the run
+ * container is without actual creation. So this function also creates the
+ * run container in *runcontainer.
+ */
+static int
+choose_container_type(const OffsetNumber *offnums, int noffs, int *size_p,
+					  uint16 *runcontainer)
+{
+	int		array_size;
+	int 	containerdata_size;
+	int		run_size;
+
+	/* calculate the space needed by each container type in byte */
+	array_size = noffs * sizeof(OffsetNumber);
+	containerdata_size = BITMAP_CONTAINER_SIZE(offnums[noffs - 1]);
+	run_size = create_run_container(offnums, noffs, runcontainer);
+
+	if (containerdata_size <= array_size && containerdata_size <= run_size)
+	{
+		*size_p = containerdata_size;
+		return DTENTRY_FLAG_TYPE_RUN;
+	}
+	else if (run_size < containerdata_size && run_size < array_size)
+	{
+		*size_p = run_size;
+		return DTENTRY_FLAG_TYPE_BITMAP;
+	}
+	else
+	{
+		*size_p = array_size;
+		return DTENTRY_FLAG_TYPE_ARRAY;
+	}
 }
 
 void
@@ -97,9 +237,9 @@ rtbm_add_tuples(RTbm *rtbm, const BlockNumber blkno,
 	DtEntry *entry;
 	bool	found;
 	char	oldstatus;
-	int		 wordnum, bitnum;
-	int		array_size, bitmap_size;
-	OffsetNumber maxoff = FirstOffsetNumber;
+	OffsetNumber runcontainer[MaxHeapTuplesPerPage + 1];
+	int container_type;
+	int container_size;
 
 	entry = dttable_insert(rtbm->dttable, blkno, &found);
 	Assert(found);
@@ -109,62 +249,65 @@ rtbm_add_tuples(RTbm *rtbm, const BlockNumber blkno,
 	MemSet(entry, 0, sizeof(DtEntry));
 	entry->status = oldstatus;
 	entry->blkno = blkno;
-	entry->offset = rtbm->curr_offset;
+	entry->offset = rtbm->offset;
 
-	/* get the highest offset number */
-	for (int i = 0; i < nitems; i++)
+	/* Choose smallest container type */
+	container_type = choose_container_type(offnums, nitems, &container_size,
+										   runcontainer);
+
+	/* Make sure we have enough container data space */
+	if ((rtbm->offset + container_size) > rtbm->containerdata_size)
 	{
-		if (offnums[i] > maxoff)
-			maxoff = offnums[i];
+		enlarge_container_space(rtbm);
+		Assert((rtbm->offset + container_size) < rtbm->containerdata_size);
 	}
 
-	/* calculate the space needed by each strategy in byte */
-	array_size = nitems * sizeof(OffsetNumber);
-	bitmap_size = (maxoff / 8) + 1;
-
-	/* enlarge bitmap space */
+	if (container_type == DTENTRY_FLAG_TYPE_BITMAP)
 	{
-	}
-
-	if (array_size <= bitmap_size)
-	{
-		OffsetNumber *off_p = (OffsetNumber *) &(rtbm->bitmap[entry->offset]);
-
-		/* Go with array container */
-		entry->flags |= DTENTRY_FLAGS_TYPE_ARRAY;
-
-		if (rtbm->curr_offset >= rtbm->bitmap_size)
-			enlarge_space(rtbm);
-
-		for (int i = 0; i < nitems; i++)
-			*(off_p + i) = offnums[i];
-
-		entry->flags |= (((uint16) nitems) & DTENTRY_FLAGS_LEN_MASK);
-		rtbm->curr_offset += ((sizeof(OffsetNumber) * nitems) + 1);
-	}
-	else
-	{
-		/* Go with bitmap container */
-		entry->flags |= DTENTRY_FLAGS_TYPE_BITMAP;
-
 		for (int i = 0; i < nitems; i++)
 		{
 			OffsetNumber off = offnums[i];
+			int	bytenum;
+			int	bitnum;
 
-			wordnum = WORDNUM(off - 1);
+			bytenum = BYTENUM(off - 1);
 			bitnum = BITNUM(off - 1);
 
-			if (wordnum + rtbm->curr_offset >= rtbm->bitmap_size)
-				enlarge_space(rtbm);
-
-			rtbm->bitmap[entry->offset + wordnum] |= (1 << bitnum);
+			rtbm->containerdata[entry->offset + bytenum] |= (1 << bitnum);
 		}
 
-		entry->flags |= (((uint16) (wordnum + 1) * 8) & DTENTRY_FLAGS_LEN_MASK);
-		rtbm->curr_offset += (wordnum + 1);
+		entry->flags |= DTENTRY_FLAG_TYPE_BITMAP;
+
+		/* Bitmap container has the number of bits */
+		entry->flags |= ((container_size * BITBYTE) & DTENTRY_FLAG_NUM_MASK);
+	}
+	else if (container_type == DTENTRY_FLAG_TYPE_RUN)
+	{
+		uint16 nruns = container_size / sizeof(OffsetNumber);
+
+		/* Copy already-created run container */
+		memcpy(&(rtbm->containerdata[entry->offset]), runcontainer,
+			   container_size);
+
+		entry->flags |= DTENTRY_FLAG_TYPE_RUN;
+
+		/* Bitmap container has the number of 2-byte integers */
+		entry->flags |= (((uint16) nruns) & DTENTRY_FLAG_NUM_MASK);
+	}
+	else
+	{
+		/* An array container has the simple array of OffsetNumber */
+		memcpy(&(rtbm->containerdata[entry->offset]), offnums,
+			   sizeof(OffsetNumber) * nitems);
+
+		entry->flags |= DTENTRY_FLAG_TYPE_ARRAY;
+
+		/* Array containers have the number of OffsetNumbers */
+		entry->flags |= (((uint16) nitems) & DTENTRY_FLAG_NUM_MASK);
 	}
 
-	rtbm->npages++;
+	rtbm->offset += container_size;
+	rtbm->nblocks++;
 }
 
 bool
@@ -173,7 +316,7 @@ rtbm_lookup(RTbm *rtbm, ItemPointer tid)
 	BlockNumber blk = ItemPointerGetBlockNumber(tid);
 	OffsetNumber off = ItemPointerGetOffsetNumber(tid);
 	DtEntry *entry;
-	int wordnum, bitnum;
+	int bytenum, bitnum;
 	bool ret = false;
 	uint16 len;
 
@@ -182,11 +325,11 @@ rtbm_lookup(RTbm *rtbm, ItemPointer tid)
 	if (!entry)
 		return false;
 
-	len = (uint16) (entry->flags & DTENTRY_FLAGS_LEN_MASK);
+	len = (uint16) (entry->flags & DTENTRY_FLAG_NUM_MASK);
 
 	if (DTENTRY_IS_ARRAY(entry))
 	{
-		OffsetNumber *off_p = (OffsetNumber *) &(rtbm->bitmap[entry->offset]);
+		OffsetNumber *off_p = (OffsetNumber *) &(rtbm->containerdata[entry->offset]);
 		ret = false;
 
 		for (int i = 0; i < len; i++)
@@ -204,14 +347,34 @@ rtbm_lookup(RTbm *rtbm, ItemPointer tid)
 			ret = false;
 		else
 		{
-			wordnum = WORDNUM(off - 1);
+			bytenum = BYTENUM(off - 1);
 			bitnum = BITNUM(off - 1);
 
-			ret = ((rtbm->bitmap[entry->offset + wordnum] & (1 << bitnum)) != 0);
+			ret = ((rtbm->containerdata[entry->offset + bytenum] & (1 << bitnum)) != 0);
 		}
 	}
 	else
-		elog(ERROR, "invalid container type");
+	{
+		OffsetNumber *runs = (OffsetNumber *) &(rtbm->containerdata[entry->offset]);
+
+		for (int i = 0; i < len; i += 2)
+		{
+			OffsetNumber start = runs[i];
+			uint16 end = start + runs[i + 1] - 1;
+
+			if (off < start)
+			{
+				ret = false;
+				break;
+			}
+
+			if (off > end)
+				continue;
+
+			ret = true;
+			break;
+		}
+	}
 
 	return ret;
 }
@@ -232,27 +395,14 @@ dttable_free(dttable_hash *dttable, void *pointer)
 	pfree(pointer);
 }
 
-static int
-rtbm_comparator(const void *left, const void *right)
-{
-	BlockNumber l = (*((DtEntry *const *) left))->blkno;
-	BlockNumber r = (*((DtEntry *const *) right))->blkno;
-
-	if (l < r)
-		return -1;
-	else if (l > r)
-		return 1;
-	return 0;
-}
-
 void
 rtbm_stats(RTbm *rtbm)
 {
-	elog(NOTICE, "dtatble_size %d bitmap_size %d npages %d, offset %d",
+	elog(NOTICE, "dtatble_size %d containerdata_size %lu nblocks %d, offset %d",
 		 rtbm->dttable_size,
-		 rtbm->bitmap_size,
-		 rtbm->npages,
-		 rtbm->curr_offset);
+		 rtbm->containerdata_size,
+		 rtbm->nblocks,
+		 rtbm->offset);
 	elog(NOTICE, "sizeof(DtEntry) %lu", sizeof(DtEntry));
 }
 
@@ -269,27 +419,38 @@ dump_entry(RTbm *rtbm, DtEntry *entry)
 					 DTENTRY_IS_BITMAP(entry) ? "BITMAP" :
 					 DTENTRY_IS_RUN(entry) ? "RUN" : "UNKNOWN");
 
-	len = (uint16) (entry->flags & DTENTRY_FLAGS_LEN_MASK);
+	len = (uint16) (entry->flags & DTENTRY_FLAG_NUM_MASK);
 
 	if (DTENTRY_IS_ARRAY(entry))
 	{
-		OffsetNumber *off_p = (OffsetNumber *) &(rtbm->bitmap[entry->offset]);
+		OffsetNumber *off_p = (OffsetNumber *) &(rtbm->containerdata[entry->offset]);
 
 		for (int i = 0; i < len; i++)
 			appendStringInfo(&str, "%d ", *(off_p + i));
 	}
-	else
+	else if (DTENTRY_IS_BITMAP(entry))
 	{
-		char *bitmap = &(rtbm->bitmap[entry->offset]);
+		char *container = &(rtbm->containerdata[entry->offset]);
 
 		for (int off = 0; off < len; off++)
 		{
-			int wordnum = WORDNUM(off - 1), bitnum = BITNUM(off - 1);
+			int bytenum = BYTENUM(off - 1), bitnum = BITNUM(off - 1);
 
 			appendStringInfo(&str, "%s",
-							 ((bitmap[wordnum] & ((char) 1 << bitnum)) != 0) ? "1" : "0");
+							 ((container[bytenum] & ((char) 1 << bitnum)) != 0) ? "1" : "0");
 			if (off > 0 && off % 8 == 0)
 				appendStringInfo(&str, "%s", " ");
+		}
+	}
+	else
+	{
+		OffsetNumber *runcontainer = (OffsetNumber *) &(rtbm->containerdata[entry->offset]);
+
+		for (int i = 0; i < len; i += 2)
+		{
+			appendStringInfo(&str, "[%d:%d] ",
+							 (uint16) runcontainer[i],
+							 (uint16) runcontainer[i + 1]);
 		}
 	}
 
@@ -306,17 +467,17 @@ rtbm_dump(RTbm *rtbm)
 	DtEntry **entries;
 	int num = 0;
 
-	entries = (DtEntry **) palloc(rtbm->npages * sizeof(DtEntry *));
+	entries = (DtEntry **) palloc(rtbm->nblocks * sizeof(DtEntry *));
 
 	dttable_start_iterate(rtbm->dttable, &iter);
 	while ((entry = dttable_iterate(rtbm->dttable, &iter)) != NULL)
 		entries[num++] = entry;
 
-	qsort(entries, rtbm->npages, sizeof(DtEntry *), rtbm_comparator);
+	qsort(entries, rtbm->nblocks, sizeof(DtEntry *), rtbm_comparator);
 
-	elog(NOTICE, "DEADTUPLESTORE (bitmap size %d, npages %d) ----------------------------",
-		 rtbm->bitmap_size, rtbm->npages);
-	for (int i = 0; i < rtbm->npages; i++)
+	elog(NOTICE, "DEADTUPLESTORE (containerdata size %lu, nblocks %d) ----------------------------",
+		 rtbm->containerdata_size, rtbm->nblocks);
+	for (int i = 0; i < rtbm->nblocks; i++)
 	{
 		entry = entries[i];
 
@@ -332,8 +493,8 @@ rtbm_dump_blk(RTbm *rtbm, BlockNumber blkno)
 
 	initStringInfo(&str);
 
-	elog(NOTICE, "DEADTUPLESTORE (bitmap size %d, npages %d) ----------------------------",
-		 rtbm->bitmap_size, rtbm->npages);
+	elog(NOTICE, "DEADTUPLESTORE (containerdata size %lu, nblocks %d) ----------------------------",
+		 rtbm->containerdata_size, rtbm->nblocks);
 	entry = dttable_lookup(rtbm->dttable, blkno);
 
 	if (!entry)

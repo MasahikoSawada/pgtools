@@ -20,6 +20,8 @@
 #include "vtbm.h"
 #include "rtbm.h"
 
+//#define DEBUG_DUMP_MATCHED 1
+
 PG_MODULE_MAGIC;
 
 #define MAX_TUPLES_PER_PAGE  MaxHeapTuplesPerPage
@@ -401,13 +403,13 @@ tbm_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 static bool
 tbm_reaped(LVTestType *lvtt, ItemPointer itemptr)
 {
-	return tbm_is_member((TIDBitmap *) lvtt->private, itemptr);
-	//return true;
+	//return tbm_is_member((TIDBitmap *) lvtt->private, itemptr);
+	return true;
 }
 static Size
 tbm_mem_usage(LVTestType *lvtt)
 {
-	tbm_stats((TIDBitmap *) lvtt->private);
+	//tbm_stats((TIDBitmap *) lvtt->private);
 	return MemoryContextMemAllocated(lvtt->mcxt, true);
 }
 
@@ -552,7 +554,10 @@ rtbm_reaped(LVTestType *lvtt, ItemPointer itemptr)
 static uint64
 rtbm_mem_usage(LVTestType *lvtt)
 {
-	//rtbm_dump((RTbm *) lvtt->private);
+	rtbm_dump_blk((RTbm *) lvtt->private, 0);
+	rtbm_dump_blk((RTbm *) lvtt->private, 1);
+	rtbm_dump_blk((RTbm *) lvtt->private, 3120);
+	rtbm_dump_blk((RTbm *) lvtt->private, 3121);
 	rtbm_stats((RTbm *) lvtt->private);
 	return MemoryContextMemAllocated(lvtt->mcxt, true);
 }
@@ -623,6 +628,10 @@ _bench(LVTestType *lvtt)
 	int matched = 0;
 	MemoryContext old_ctx;
 
+#ifdef DEBUG_DUMP_MATCHED
+	FILE *f = fopen(lvtt->name, "w");
+#endif
+
 	if (!lvtt->private)
 		elog(ERROR, "%s dead tuples are not preapred", lvtt->name);
 
@@ -632,10 +641,23 @@ _bench(LVTestType *lvtt)
 	{
 		CHECK_FOR_INTERRUPTS();
 		if (lvtt->reaped_fn(lvtt, &(IndexTids_cache->itemptrs[i])))
+		{
+#ifdef DEBUG_DUMP_MATCHED
+			char buf[128] = {0};
+			sprintf(buf, "(%5u, %5u)\n",
+					 ItemPointerGetBlockNumber(&(IndexTids_cache->itemptrs[i])),
+					 ItemPointerGetOffsetNumber(&(IndexTids_cache->itemptrs[i])));
+			fwrite(buf, strlen(buf), 1, f);
+#endif
 			matched++;
+		}
 	}
 
 	MemoryContextSwitchTo(old_ctx);
+
+#ifdef DEBUG_DUMP_MATCHED
+	fclose(f);
+#endif
 
 	elog(NOTICE, "\"%s\": dead tuples %lu, index tuples %lu, mathed %d, mem %zu",
 		 lvtt->name,
@@ -739,7 +761,7 @@ prepare(PG_FUNCTION_ARGS)
 	int dt_interval_in_page = PG_GETARG_INT32(2);
 	int dt_interval = PG_GETARG_INT32(3);
 
-	OffsetNumber maxoff = ((dt_per_page - 1) * dt_interval_in_page) + 1;
+	OffsetNumber maxoff = ((dt_per_page) * dt_interval_in_page);
 	uint64 ndts = 0;
 	uint64 nidx = 0;
 
@@ -774,9 +796,14 @@ prepare(PG_FUNCTION_ARGS)
 			ItemPointerSetOffsetNumber(&tid, off);
 
 			if (blkno % dt_interval == 0 &&
-				(off) % dt_interval_in_page == 1 &&
+				off % dt_interval_in_page == 0 &&
 				ndt_per_page <= dt_per_page)
+			{
+				if (blkno == 0)
+					elog(NOTICE, "(%d,%d)", blkno, off);
+				ndt_per_page++;
 				DeadTuples_orig->itemptrs[ndts++] = tid;
+			}
 
 			IndexTids_cache->itemptrs[nidx++] = tid;
 		}
