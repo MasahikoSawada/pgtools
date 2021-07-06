@@ -132,8 +132,8 @@ typedef struct RTbm
 #define RTBM_CONTAINERDATA_INITIAL_SIZE	(64 * 1024) /* 64kB */
 
 #define BITBYTE 8
-#define BYTENUM(x) ((x) / 8)
-#define BITNUM(x) ((x) % 8)
+#define BYTENUM(x) ((x) / BITBYTE)
+#define BITNUM(x) ((x) % BITBYTE)
 
 static void enlarge_container_space(RTbm *rtbm)
 {
@@ -287,7 +287,6 @@ rtbm_add_tuples(RTbm *rtbm, const BlockNumber blkno,
 		/* Copy already-created run container */
 		memcpy(&(rtbm->containerdata[entry->offset]), runcontainer,
 			   container_size);
-		//memcpy(container, runcontainer, container_size);
 
 		entry->flags |= DTENTRY_FLAG_TYPE_RUN;
 
