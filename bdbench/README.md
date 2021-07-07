@@ -74,6 +74,8 @@ I've considered to integrate either `vtbm` or `rtbm` with `TIDBitmap` but it see
 
 **All TIDs used as index tuples and dead tuples and the data structure are allocated in `TopMemoryContext`, lasting until the proc exit. Therefore, please note that the following steps must be executed in the same connection, the same backend process.**
 
+`bench.sql` is an example of the following operations.
+
 ### Preparation
 
 1. Generate index tuple TIDs and dead tuple TIDs
@@ -82,7 +84,7 @@ I've considered to integrate either `vtbm` or `rtbm` with `TIDBitmap` but it see
 select prepare(100000000, 12, 5, 10);
 ```
 
-`prepare()` SQL function generates TIDs on memory, simulating dead tuples and index tuples. In the above example, it generates `12` dead tuples per block with `5` offset interval in blocks with `10` block interval, generating `100000000` in total.
+`prepare()` SQL function generates TIDs on memory, simulating dead tuples and index tuples. In the above example, it generates `12` dead tuples per block with `5` offset interval in blocks in `10` blocks interval, generating `100000000` in total.
 
 ### Evaluate the loading performance
 
