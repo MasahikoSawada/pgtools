@@ -138,11 +138,8 @@ typedef struct RTbm
 static void enlarge_container_space(RTbm *rtbm)
 {
 	int newsize = rtbm->containerdata_size * 2;
-	char *new = palloc0(newsize);
 
-	memcpy(new, rtbm->containerdata, rtbm->containerdata_size);
-	pfree(rtbm->containerdata);
-	rtbm->containerdata = new;
+	rtbm->containerdata = repalloc_huge(rtbm->containerdata, newsize);
 	rtbm->containerdata_size = newsize;
 }
 
