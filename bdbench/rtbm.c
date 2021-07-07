@@ -93,7 +93,7 @@ typedef struct DtEntry
 	char		status; /* hash entry status */
 	uint16		flags; /* type of the container and the number of elements
 						* in the container */
-	uint32		offset; /* start offset within the containerdata */
+	uint64		offset; /* start offset within the containerdata */
 } DtEntry;
 
 #define DTENTRY_IS_ARRAY(entry) \
