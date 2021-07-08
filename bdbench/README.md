@@ -110,7 +110,7 @@ Time: 38685.140 ms (00:38.685)
 
 The argument can be one of the supported methods.
 
-## Chcek memory usage
+## Check memory usage
 
 ```sql
 select * from pg_backend_memory_contexts where name ~ 'bench' or name = 'TopMemoryContext' order by name;
