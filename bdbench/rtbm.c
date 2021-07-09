@@ -239,7 +239,7 @@ rtbm_add_tuples(RTbm *rtbm, const BlockNumber blkno,
 	int container_size;
 
 	entry = dttable_insert(rtbm->dttable, blkno, &found);
-	Assert(found);
+	Assert(!found);
 
 	/* initialize entry */
 	oldstatus = entry->status;
