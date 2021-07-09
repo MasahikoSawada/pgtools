@@ -1,0 +1,47 @@
+commit 25a7ccd07c5c04fe7716e1c445409747791c3985
+Author: Masahiko Sawada <sawada.mshk@gmail.com>
+Date:   Fri Jul 9 15:54:00 2021 +0900
+
+    add tbm_is_member.
+
+diff --git a/src/backend/nodes/tidbitmap.c b/src/backend/nodes/tidbitmap.c
+index c5feacbff4..b2eb744a80 100644
+--- a/src/backend/nodes/tidbitmap.c
++++ b/src/backend/nodes/tidbitmap.c
+@@ -671,6 +671,25 @@ tbm_is_empty(const TIDBitmap *tbm)
+ 	return (tbm->nentries == 0);
+ }
+ 
++bool
++tbm_is_member(TIDBitmap *tbm, ItemPointer tid)
++{
++	const PagetableEntry *page = NULL;
++	BlockNumber blk = ItemPointerGetBlockNumber(tid);
++	OffsetNumber off = ItemPointerGetOffsetNumber(tid);
++	int wordnum, bitnum;
++
++	page = tbm_find_pageentry(tbm, blk);
++
++	if (!page)
++		return false;
++
++	wordnum = WORDNUM(off - 1);
++	bitnum = BITNUM(off - 1);
++
++	return ((page->words[wordnum] & ((bitmapword) 1 << bitnum)) != 0);
++}
++
+ /*
+  * tbm_begin_iterate - prepare to iterate through a TIDBitmap
+  *
+diff --git a/src/include/nodes/tidbitmap.h b/src/include/nodes/tidbitmap.h
+index bc67166105..8459f100b2 100644
+--- a/src/include/nodes/tidbitmap.h
++++ b/src/include/nodes/tidbitmap.h
+@@ -72,4 +72,6 @@ extern TBMSharedIterator *tbm_attach_shared_iterate(dsa_area *dsa,
+ 													dsa_pointer dp);
+ extern long tbm_calculate_entries(double maxbytes);
+ 
++extern bool tbm_is_member(TIDBitmap *tbm, ItemPointer tid);
++
+ #endif							/* TIDBITMAP_H */

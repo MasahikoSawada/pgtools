@@ -74,7 +74,16 @@ I've considered to integrate either `vtbm` or `rtbm` with `TIDBitmap` but it see
 
 **All TIDs used as index tuples and dead tuples and the data structure are allocated in `TopMemoryContext`, lasting until the proc exit. Therefore, please note that the following steps must be executed in the same connection, the same backend process.**
 
-`bench.sql` is an example of the following operations.
+Please also note that building `bdbench.c` requires to apply `tbm_is_member.patch` to PostgreSQL code to add the existence check to `TIDBitmap`. Or if you don't want to measure `TIDBitmap` please just comment out the following line in `tbm_reaped()` function:
+
+```c
+static bool
+tbm_reaped(LVTestType *lvtt, ItemPointer itemptr)
+{
+	//return tbm_is_member((TIDBitmap *) lvtt->private, itemptr); // comment out this line.
+	return true;
+}
+```
 
 ### Preparation
 
