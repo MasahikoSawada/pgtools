@@ -403,8 +403,8 @@ tbm_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 static bool
 tbm_reaped(LVTestType *lvtt, ItemPointer itemptr)
 {
-	//return tbm_is_member((TIDBitmap *) lvtt->private, itemptr);
-	return true;
+	return tbm_is_member((TIDBitmap *) lvtt->private, itemptr);
+	//return true;
 }
 static Size
 tbm_mem_usage(LVTestType *lvtt)
@@ -795,14 +795,24 @@ prepare(PG_FUNCTION_ARGS)
 				off % dt_interval_in_page == 0 &&
 				ndt_per_page <= dt_per_page)
 			{
-				if (blkno == 0)
-					elog(NOTICE, "(%d,%d)", blkno, off);
 				ndt_per_page++;
 				DeadTuples_orig->itemptrs[ndts++] = tid;
 			}
 
 			IndexTids_cache->itemptrs[nidx++] = tid;
 		}
+	}
+
+	/* Shuffle index tuples */
+	for (int i = 0; i < nidx; i++)
+	{
+		int a = i;
+		int b = random() % nidx;
+		ItemPointerData tmp;
+
+		tmp = IndexTids_cache->itemptrs[a];
+		IndexTids_cache->itemptrs[a] = IndexTids_cache->itemptrs[b];
+		IndexTids_cache->itemptrs[b] = tmp;
 	}
 
 	DeadTuples_orig->dtinfo.nitems = ndts;
