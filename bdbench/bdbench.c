@@ -19,6 +19,7 @@
 
 #include "vtbm.h"
 #include "rtbm.h"
+#include "radix.h"
 
 //#define DEBUG_DUMP_MATCHED 1
 
@@ -89,6 +90,7 @@ PG_FUNCTION_INFO_V1(attach_dead_tuples);
 PG_FUNCTION_INFO_V1(bench);
 PG_FUNCTION_INFO_V1(test_generate_tid);
 PG_FUNCTION_INFO_V1(rtbm_test);
+PG_FUNCTION_INFO_V1(radix_run_tests);
 PG_FUNCTION_INFO_V1(prepare);
 
 /*
@@ -137,6 +139,16 @@ static void rtbm_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 static bool rtbm_reaped(LVTestType *lvtt, ItemPointer itemptr);
 static Size rtbm_mem_usage(LVTestType *lvtt);
 
+/* radix */
+static void radix_init(LVTestType *lvtt, uint64 nitems);
+static void radix_fini(LVTestType *lvtt);
+static void radix_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+						 BlockNumber maxblk, OffsetNumber maxoff);
+static bool radix_reaped(LVTestType *lvtt, ItemPointer itemptr);
+static Size radix_mem_usage(LVTestType *lvtt);
+static void radix_load(void *tbm, ItemPointerData *itemptrs, int nitems);
+
+
 /* Misc functions */
 static void generate_index_tuples(uint64 nitems, BlockNumber minblk,
 								  BlockNumber maxblk, OffsetNumber maxoff);
@@ -156,12 +168,13 @@ static void load_rtbm(RTbm *vtbm, ItemPointerData *itemptrs, int nitems);
 		.dtinfo = {0}, \
 		.name = #n, \
 		.init_fn = n##_init, \
+		.fini_fn = n##_fini, \
 		.attach_fn = n##_attach, \
 		.reaped_fn = n##_reaped, \
 		.mem_usage_fn = n##_mem_usage, \
 			}
 
-#define TEST_SUBJECT_TYPES 5
+#define TEST_SUBJECT_TYPES 6
 static LVTestType LVTestSubjects[TEST_SUBJECT_TYPES] =
 {
 	DECLARE_SUBJECT(array),
@@ -169,6 +182,7 @@ static LVTestType LVTestSubjects[TEST_SUBJECT_TYPES] =
 	DECLARE_SUBJECT(intset),
 	DECLARE_SUBJECT(vtbm),
 	DECLARE_SUBJECT(rtbm),
+	DECLARE_SUBJECT(radix)
 };
 
 static bool
@@ -190,6 +204,31 @@ update_info(DeadTupleInfo *info, uint64 nitems, BlockNumber minblk,
 	info->minblk = minblk;
 	info->maxblk = maxblk;
 	info->maxoff = maxoff;
+}
+
+
+/* from geqo's init_tour(), geqo_randint() */
+static int
+shuffle_randrange(unsigned short xseed[3], int lower, int upper)
+{
+	return (int) floor( pg_erand48(xseed) * ((upper-lower)+0.999999)) + lower;
+}
+
+/* Naive Fisher-Yates implementation*/
+static void
+shuffle_itemptrs(uint64 nitems, ItemPointer itemptrs)
+{
+	/* reproducability */
+	unsigned short xseed[3] = {0};
+
+	for (int i = 0; i < nitems - 1; i++)
+	{
+		int j = shuffle_randrange(xseed, i, nitems - 1);
+		ItemPointerData t = itemptrs[j];
+
+		itemptrs[j] = itemptrs[i];
+		itemptrs[i] = t;
+	}
 }
 
 static void
@@ -586,6 +625,138 @@ load_rtbm(RTbm *rtbm, ItemPointerData *itemptrs, int nitems)
 	rtbm_add_tuples(rtbm, curblkno, offs, noffs);
 }
 
+/* ---------- radix ---------- */
+static void
+radix_init(LVTestType *lvtt, uint64 nitems)
+{
+	MemoryContext old_ctx;
+
+	lvtt->mcxt = AllocSetContextCreate(TopMemoryContext,
+									   "radix bench",
+									   ALLOCSET_DEFAULT_SIZES);
+	old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
+	lvtt->private = palloc(sizeof(bfm_tree));
+	bfm_init(lvtt->private);
+	MemoryContextSwitchTo(old_ctx);
+}
+static void
+radix_fini(LVTestType *lvtt)
+{
+#if 0
+	if (lvtt->private)
+		bfm_free((RTbm *) lvtt->private);
+#endif
+}
+
+/* log(sizeof(bfm_value_type) * BITS_PER_BYTE, 2) = log(64, 2) = 6 */
+#define ENCODE_BITS 6
+
+static uint64
+radix_to_key_off(ItemPointer tid, uint32 *off)
+{
+	uint64 upper;
+
+	uint32 shift = pg_ceil_log2_32(MaxHeapTuplesPerPage);
+	int64 tid_i;
+
+	Assert(ItemPointerGetOffsetNumber(tid) < MaxHeapTuplesPerPage);
+
+	tid_i = ItemPointerGetOffsetNumber(tid);
+	tid_i |= ItemPointerGetBlockNumber(tid) << shift;
+
+	*off = tid_i & ((1 << ENCODE_BITS)-1);
+	upper = tid_i >> ENCODE_BITS;
+	Assert(*off < (sizeof(bfm_value_type) * BITS_PER_BYTE));
+
+	Assert(*off < 64);
+
+	return upper;
+}
+
+static void
+radix_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+			   BlockNumber maxblk, OffsetNumber maxoff)
+{
+	MemoryContext oldcontext = MemoryContextSwitchTo(lvtt->mcxt);
+
+	radix_load(lvtt->private,
+			   DeadTuples_orig->itemptrs,
+			   DeadTuples_orig->dtinfo.nitems);
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+
+static bool
+radix_reaped(LVTestType *lvtt, ItemPointer itemptr)
+{
+	uint64 key;
+	uint32 off;
+	bfm_value_type val;
+
+	key = radix_to_key_off(itemptr, &off);
+
+	if (!bfm_lookup((bfm_tree *) lvtt->private, key, &val))
+		return false;
+
+	return val & ((bfm_value_type)1 << off);
+}
+
+static uint64
+radix_mem_usage(LVTestType *lvtt)
+{
+	bfm_tree *root = lvtt->private;
+	size_t mem = MemoryContextMemAllocated(lvtt->mcxt, true);
+	StringInfo s;
+
+	s = bfm_stats(root);
+
+	ereport(NOTICE,
+			errmsg("radix tree of %.2f MB, %s",
+				   (double) mem / (1024 * 1024),
+				   s->data),
+			errhidestmt(true),
+			errhidecontext(true));
+
+	pfree(s->data);
+	pfree(s);
+
+	return mem;
+}
+
+static void
+radix_load(void *tbm, ItemPointerData *itemptrs, int nitems)
+{
+	bfm_tree *root = (bfm_tree *) tbm;
+	uint64 last_key = PG_UINT64_MAX;
+	uint64 val = 0;
+
+	for (int i = 0; i < nitems; i++)
+	{
+		ItemPointer tid = &(itemptrs[i]);
+		uint64 key;
+		uint32 off;
+
+		key = radix_to_key_off(tid, &off);
+
+		if (last_key != PG_UINT64_MAX &&
+			last_key != key)
+		{
+			bfm_set(root, last_key, val);
+			val = 0;
+		}
+
+		last_key = key;
+		val |= (uint64)1 << off;
+	}
+
+	if (last_key != PG_UINT64_MAX)
+	{
+		bfm_set(root, last_key, val);
+	}
+}
+
+
 static void
 attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk, BlockNumber maxblk,
 	   OffsetNumber maxoff)
@@ -951,4 +1122,12 @@ rtbm_test(PG_FUNCTION_ARGS)
 		 matched_rtbm);
 	PG_RETURN_NULL();
 
+}
+
+Datum
+radix_run_tests(PG_FUNCTION_ARGS)
+{
+	bfm_tests();
+
+	PG_RETURN_VOID();
 }

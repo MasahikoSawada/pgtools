@@ -2,7 +2,7 @@
 
 MODULE_big = bdbench
 DATA = bdbench--1.0.sql
-OBJS = bdbench.o vtbm.o rtbm.o
+OBJS = bdbench.o vtbm.o rtbm.o radix.o
 
 EXTENSION = bdbench
 REGRESS= bdbench
