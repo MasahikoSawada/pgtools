@@ -655,7 +655,7 @@ _bench(LVTestType *lvtt)
 	fclose(f);
 #endif
 
-	elog(NOTICE, "\"%s\": dead tuples %lu, index tuples %lu, mathed %d, mem %zu",
+	elog(NOTICE, "\"%s\": dead tuples %lu, index tuples %lu, matched %d, mem %zu",
 		 lvtt->name,
 		 lvtt->dtinfo.nitems,
 		 IndexTids_cache->dtinfo.nitems,

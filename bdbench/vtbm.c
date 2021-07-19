@@ -72,7 +72,8 @@ vtbm_add_tuples(VTbm *vtbm, const BlockNumber blkno,
 	DtEntry *entry;
 	bool	found;
 	char	oldstatus;
-	int wordnum, bitnum;
+	int wordnum = 0;
+	int bitnum;
 
 	entry = dttable_insert(vtbm->dttable, blkno, &found);
 	Assert(!found);
@@ -216,8 +217,10 @@ vtbm_dump(VTbm *vtbm)
 		 vtbm->bitmap_size, vtbm->npages);
 	for (int i = 0; i < vtbm->npages; i++)
 	{
+		char *bitmap;
+
 		entry = entries[i];
-		char *bitmap = &(vtbm->bitmap[entry->offset]);
+		bitmap = &(vtbm->bitmap[entry->offset]);
 
 		appendStringInfo(&str, "[%5d] : ", entry->blkno);
 		for (int off = 0; off < entry->len; off++)
@@ -239,6 +242,7 @@ vtbm_dump_blk(VTbm *vtbm, BlockNumber blkno)
 {
 	DtEntry *entry;
 	StringInfoData str;
+	char *bitmap;
 
 	initStringInfo(&str);
 
@@ -252,7 +256,7 @@ vtbm_dump_blk(VTbm *vtbm, BlockNumber blkno)
 		return;
 	}
 
-	char *bitmap = &(vtbm->bitmap[entry->offset]);
+	bitmap = &(vtbm->bitmap[entry->offset]);
 
 	appendStringInfo(&str, "[%5d] : ", entry->blkno);
 	for (int off = 1; off < entry->len; off++)

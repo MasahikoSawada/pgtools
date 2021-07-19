@@ -449,9 +449,9 @@ dump_entry(RTbm *rtbm, DtEntry *entry)
 		}
 	}
 
-	elog(NOTICE, "%s (offset %d len %d)",
+	elog(NOTICE, "%s (offset %llu len %d)",
 		 str.data,
-		 entry->offset, len);
+		 (long long unsigned) entry->offset, len);
 }
 
 static int
