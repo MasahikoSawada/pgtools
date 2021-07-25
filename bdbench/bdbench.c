@@ -7,6 +7,7 @@
 
 #include "postgres.h"
 
+#include <math.h>
 #include "catalog/index.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -20,6 +21,7 @@
 #include "vtbm.h"
 #include "rtbm.h"
 #include "radix.h"
+#include "svtm.h"
 
 //#define DEBUG_DUMP_MATCHED 1
 
@@ -148,6 +150,15 @@ static bool radix_reaped(LVTestType *lvtt, ItemPointer itemptr);
 static Size radix_mem_usage(LVTestType *lvtt);
 static void radix_load(void *tbm, ItemPointerData *itemptrs, int nitems);
 
+/* svtm */
+static void svtm_init(LVTestType *lvtt, uint64 nitems);
+static void svtm_fini(LVTestType *lvtt);
+static void svtm_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+						 BlockNumber maxblk, OffsetNumber maxoff);
+static bool svtm_reaped(LVTestType *lvtt, ItemPointer itemptr);
+static Size svtm_mem_usage(LVTestType *lvtt);
+static void svtm_load(SVTm *tbm, ItemPointerData *itemptrs, int nitems);
+
 
 /* Misc functions */
 static void generate_index_tuples(uint64 nitems, BlockNumber minblk,
@@ -174,7 +185,7 @@ static void load_rtbm(RTbm *vtbm, ItemPointerData *itemptrs, int nitems);
 		.mem_usage_fn = n##_mem_usage, \
 			}
 
-#define TEST_SUBJECT_TYPES 6
+#define TEST_SUBJECT_TYPES 7
 static LVTestType LVTestSubjects[TEST_SUBJECT_TYPES] =
 {
 	DECLARE_SUBJECT(array),
@@ -182,7 +193,8 @@ static LVTestType LVTestSubjects[TEST_SUBJECT_TYPES] =
 	DECLARE_SUBJECT(intset),
 	DECLARE_SUBJECT(vtbm),
 	DECLARE_SUBJECT(rtbm),
-	DECLARE_SUBJECT(radix)
+	DECLARE_SUBJECT(radix),
+	DECLARE_SUBJECT(svtm)
 };
 
 static bool
@@ -754,6 +766,81 @@ radix_load(void *tbm, ItemPointerData *itemptrs, int nitems)
 	{
 		bfm_set(root, last_key, val);
 	}
+}
+
+/* ------------ svtm ----------- */
+static void
+svtm_init(LVTestType *lvtt, uint64 nitems)
+{
+	MemoryContext old_ctx;
+
+	lvtt->mcxt = AllocSetContextCreate(TopMemoryContext,
+									   "svtm bench",
+									   ALLOCSET_DEFAULT_SIZES);
+	old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
+	lvtt->private = svtm_create();
+	MemoryContextSwitchTo(old_ctx);
+}
+
+static void
+svtm_fini(LVTestType *lvtt)
+{
+	if (lvtt->private != NULL)
+		svtm_free(lvtt->private);
+}
+
+static void
+svtm_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+			   BlockNumber maxblk, OffsetNumber maxoff)
+{
+	MemoryContext oldcontext = MemoryContextSwitchTo(lvtt->mcxt);
+
+	svtm_load(lvtt->private,
+			   DeadTuples_orig->itemptrs,
+			   DeadTuples_orig->dtinfo.nitems);
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+static bool
+svtm_reaped(LVTestType *lvtt, ItemPointer itemptr)
+{
+	return svtm_lookup(lvtt->private, itemptr);
+}
+
+static uint64
+svtm_mem_usage(LVTestType *lvtt)
+{
+	svtm_stats((SVTm *) lvtt->private);
+	return MemoryContextMemAllocated(lvtt->mcxt, true);
+}
+
+static void
+svtm_load(SVTm *svtm, ItemPointerData *itemptrs, int nitems)
+{
+	BlockNumber curblkno = InvalidBlockNumber;
+	OffsetNumber offs[1024];
+	int noffs = 0;
+
+	for (int i = 0; i < nitems; i++)
+	{
+		ItemPointer tid = &(itemptrs[i]);
+		BlockNumber blkno = ItemPointerGetBlockNumber(tid);
+
+		if (curblkno != InvalidBlockNumber &&
+			curblkno != blkno)
+		{
+			svtm_add_page(svtm, curblkno, offs, noffs);
+			curblkno = blkno;
+			noffs = 0;
+		}
+
+		curblkno = blkno;
+		offs[noffs++] = ItemPointerGetOffsetNumber(tid);
+	}
+
+	svtm_add_page(svtm, curblkno, offs, noffs);
+	svtm_finalize_addition(svtm);
 }
 
 
