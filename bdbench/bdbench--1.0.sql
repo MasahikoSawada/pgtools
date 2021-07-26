@@ -43,9 +43,11 @@ LANGUAGE C STRICT VOLATILE;
 
 CREATE FUNCTION prepare(
 maxblk bigint,
-dt_per_page int,
-dt_interval_in_page int,
-dt_interval int)
+dt_per_page bigint,
+dt_interval_in_page bigint,
+dt_consecutives bigint,
+dt_interval int,
+shuffle bool default true)
 RETURNS text
 AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT VOLATILE;

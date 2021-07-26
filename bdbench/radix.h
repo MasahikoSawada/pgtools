@@ -64,7 +64,8 @@ typedef struct bfm_tree
 } bfm_tree;
 
 extern void bfm_init(bfm_tree *root);
-extern bool bfm_lookup(bfm_tree *root, bfm_key_type key, bfm_value_type *val);
+//extern bool bfm_lookup(bfm_tree *root, bfm_key_type key, bfm_value_type *val);
+extern bool bfm_lookup(bfm_tree *root, uint64_t key, bfm_value_type *val);
 extern bool bfm_set(bfm_tree *root, bfm_key_type key, bfm_value_type val);
 extern bool bfm_delete(bfm_tree *root, bfm_key_type key);
 

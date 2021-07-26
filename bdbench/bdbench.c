@@ -924,33 +924,74 @@ Datum
 prepare(PG_FUNCTION_ARGS)
 {
 	BlockNumber maxblk = PG_GETARG_INT64(0);
-	int dt_per_page = PG_GETARG_INT32(1);
-	int dt_interval_in_page = PG_GETARG_INT32(2);
-	int dt_interval = PG_GETARG_INT32(3);
+	uint64 ndeadtuples_in_page = PG_GETARG_INT32(1);
+	uint64 interval_in_page = PG_GETARG_INT32(2);
+	uint64 page_consecutives = PG_GETARG_INT32(3);
+	uint64 page_interval = PG_GETARG_INT32(4);
+	bool shuffle = PG_GETARG_BOOL(5);
 
-	OffsetNumber maxoff = ((dt_per_page) * dt_interval_in_page);
+	OffsetNumber maxoff = ndeadtuples_in_page * interval_in_page;
 	uint64 ndts = 0;
 	uint64 nidx = 0;
+	uint64 ndts_tmp = 0;
+	uint64 nidx_tmp = 0;
 
+	ndts = ((maxblk / page_interval) * page_consecutives) * ndeadtuples_in_page;
 	DeadTuples_orig = MemoryContextAllocHuge(TopMemoryContext,
 											 sizeof(DeadTuplesArray));
 	DeadTuples_orig->itemptrs =
 		(ItemPointer) MemoryContextAllocHuge(TopMemoryContext,
-											 sizeof(ItemPointerData) *
-											 ((((uint64) maxblk / dt_interval) * (dt_per_page))) * 1.05);
+											 sizeof(ItemPointerData) * ndts);
 
+	nidx = maxblk * maxoff;
 	IndexTids_cache = MemoryContextAllocHuge(TopMemoryContext,
 											 sizeof(DeadTuplesArray));
 	IndexTids_cache->itemptrs =
 		(ItemPointer) MemoryContextAllocHuge(TopMemoryContext,
-											 sizeof(ItemPointerData) *
-											 (((uint64) maxblk * (maxoff))) * 1.05);
+											 sizeof(ItemPointerData) * nidx);
 
-	elog(NOTICE, "dead tuples: total %d, %d tuples with interval %d in page (maxoff %u)",
-		 ((maxblk / dt_interval) * (dt_per_page)),
-		 dt_per_page,
-		 dt_interval_in_page,
-		 maxoff);
+	elog(NOTICE, "dead tuples: page: total %lu, %lu tuples with interval %lu in page (maxoff %u, shuffle %d), blk: maxblk %u consecutive %lu interval %lu, setting: ndts %lu nidx %lu",
+		 ((maxblk / page_interval) * (ndeadtuples_in_page)),
+		 ndeadtuples_in_page,
+		 interval_in_page,
+		 maxoff,
+		 shuffle,
+		 maxblk,
+		 page_consecutives,
+		 page_interval,
+		 ndts, nidx);
+
+	for (BlockNumber blkno = 0; blkno < maxblk; blkno++)
+	{
+		uint64 ndt_this_page = 0;
+
+		for (OffsetNumber off = FirstOffsetNumber; off <= maxoff; off++)
+		{
+			ItemPointerData tid;
+
+			ItemPointerSetBlockNumber(&tid, blkno);
+			ItemPointerSetOffsetNumber(&tid, off);
+
+			if ((blkno % page_interval) < page_consecutives &&
+				off % interval_in_page == 0 &&
+				ndt_this_page <= ndeadtuples_in_page)
+			{
+				elog(NOTICE, "(%u, %u)",
+					 blkno, off);
+				ndt_this_page++;
+				DeadTuples_orig->itemptrs[ndts_tmp++] = tid;
+			}
+			IndexTids_cache->itemptrs[nidx_tmp++] = tid;
+		}
+	}
+
+	if (ndts_tmp != ndts)
+		elog(ERROR, ";lkjasd;ja;sldkjflkjd");
+
+	if (nidx_tmp != nidx)
+		elog(ERROR, ";alkdsj;alksjdf;lakjd;fljs;dklfjas;kljfdas;kljfs;lkjdlfkj");
+
+	/*
 	for (BlockNumber blkno = 0; blkno < maxblk; blkno++)
 	{
 		int ndt_per_page = 0;
@@ -962,8 +1003,8 @@ prepare(PG_FUNCTION_ARGS)
 			ItemPointerSetBlockNumber(&tid, blkno);
 			ItemPointerSetOffsetNumber(&tid, off);
 
-			if (blkno % dt_interval == 0 &&
-				off % dt_interval_in_page == 0 &&
+			if (blkno % dt_page_interval == 0 &&
+				off % dt_page_interval_in_page == 0 &&
 				ndt_per_page <= dt_per_page)
 			{
 				ndt_per_page++;
@@ -973,18 +1014,11 @@ prepare(PG_FUNCTION_ARGS)
 			IndexTids_cache->itemptrs[nidx++] = tid;
 		}
 	}
+	*/
 
 	/* Shuffle index tuples */
-	for (int i = 0; i < nidx; i++)
-	{
-		int a = i;
-		int b = random() % nidx;
-		ItemPointerData tmp;
-
-		tmp = IndexTids_cache->itemptrs[a];
-		IndexTids_cache->itemptrs[a] = IndexTids_cache->itemptrs[b];
-		IndexTids_cache->itemptrs[b] = tmp;
-	}
+	if (shuffle)
+		shuffle_itemptrs(nidx, IndexTids_cache->itemptrs);
 
 	DeadTuples_orig->dtinfo.nitems = ndts;
 	IndexTids_cache->dtinfo.nitems = nidx;
