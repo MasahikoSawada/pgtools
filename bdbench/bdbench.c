@@ -879,7 +879,7 @@ attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk, BlockNumber maxblk,
 static void
 _bench(LVTestType *lvtt)
 {
-	int matched = 0;
+	uint64 matched = 0;
 	MemoryContext old_ctx;
 
 #ifdef DEBUG_DUMP_MATCHED
@@ -913,7 +913,11 @@ _bench(LVTestType *lvtt)
 	fclose(f);
 #endif
 
-	elog(NOTICE, "\"%s\": dead tuples %lu, index tuples %lu, matched %d, mem %zu",
+	if (matched != lvtt->dtinfo.nitems)
+		elog(WARNING, "the number of dead tuples found doesn't match the actual dead tuples: got %lu expected %lu",
+			 matched, lvtt->dtinfo.nitems);
+
+	elog(NOTICE, "\"%s\": dead tuples %lu, index tuples %lu, matched %lu, mem %zu",
 		 lvtt->name,
 		 lvtt->dtinfo.nitems,
 		 IndexTids_cache->dtinfo.nitems,
@@ -1023,22 +1027,22 @@ prepare(PG_FUNCTION_ARGS)
 	uint64 ndts_tmp = 0;
 	uint64 nidx_tmp = 0;
 
-	ndts = ((maxblk / page_interval) * page_consecutives) * ndeadtuples_in_page;
+	ndts = ((uint64) ceil((double)maxblk / page_interval) * page_consecutives) * ndeadtuples_in_page;
 	DeadTuples_orig = MemoryContextAllocHuge(TopMemoryContext,
 											 sizeof(DeadTuplesArray));
 	DeadTuples_orig->itemptrs =
 		(ItemPointer) MemoryContextAllocHuge(TopMemoryContext,
 											 sizeof(ItemPointerData) * ndts);
 
-	nidx = maxblk * maxoff;
+	nidx = ((uint64) maxblk) * ((uint64) maxoff);
 	IndexTids_cache = MemoryContextAllocHuge(TopMemoryContext,
 											 sizeof(DeadTuplesArray));
 	IndexTids_cache->itemptrs =
 		(ItemPointer) MemoryContextAllocHuge(TopMemoryContext,
 											 sizeof(ItemPointerData) * nidx);
 
-	elog(WARNING, "dead tuples: page: total %lu, %lu tuples with interval %lu in page (maxoff %u, shuffle %d), blk: maxblk %u consecutive %lu interval %lu, setting: ndts %lu nidx %lu",
-		 ((maxblk / page_interval) * (ndeadtuples_in_page)),
+	elog(WARNING, "dead tuples: page: total %lu tuples, %lu tuples with interval %lu in page (maxoff %u, shuffle %d), blk: maxblk %u consecutive %lu interval %lu, setting: ndts %lu nidx %lu",
+		 ndts,
 		 ndeadtuples_in_page,
 		 interval_in_page,
 		 maxoff,
@@ -1070,10 +1074,10 @@ prepare(PG_FUNCTION_ARGS)
 		}
 	}
 
-	if (ndts_tmp != ndts)
+	/* sanity checks */
+	if (ndts_tmp > ndts)
 		elog(ERROR, "ndts_tmp %lu ndts %lu", ndts_tmp, ndts);
-
-	if (nidx_tmp != nidx)
+	if (nidx_tmp > nidx)
 		elog(ERROR, "nidx_tmp %lu nidx %lu", nidx_tmp, nidx);
 
 	/* Shuffle index tuples */
