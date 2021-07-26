@@ -1063,8 +1063,6 @@ prepare(PG_FUNCTION_ARGS)
 				off % interval_in_page == 0 &&
 				ndt_this_page <= ndeadtuples_in_page)
 			{
-				elog(WARNING, "(%u, %u)",
-					 blkno, off);
 				ndt_this_page++;
 				DeadTuples_orig->itemptrs[ndts_tmp++] = tid;
 			}
