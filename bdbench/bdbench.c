@@ -1037,7 +1037,7 @@ prepare(PG_FUNCTION_ARGS)
 		(ItemPointer) MemoryContextAllocHuge(TopMemoryContext,
 											 sizeof(ItemPointerData) * nidx);
 
-	elog(NOTICE, "dead tuples: page: total %lu, %lu tuples with interval %lu in page (maxoff %u, shuffle %d), blk: maxblk %u consecutive %lu interval %lu, setting: ndts %lu nidx %lu",
+	elog(WARNING, "dead tuples: page: total %lu, %lu tuples with interval %lu in page (maxoff %u, shuffle %d), blk: maxblk %u consecutive %lu interval %lu, setting: ndts %lu nidx %lu",
 		 ((maxblk / page_interval) * (ndeadtuples_in_page)),
 		 ndeadtuples_in_page,
 		 interval_in_page,
@@ -1063,7 +1063,7 @@ prepare(PG_FUNCTION_ARGS)
 				off % interval_in_page == 0 &&
 				ndt_this_page <= ndeadtuples_in_page)
 			{
-				elog(NOTICE, "(%u, %u)",
+				elog(WARNING, "(%u, %u)",
 					 blkno, off);
 				ndt_this_page++;
 				DeadTuples_orig->itemptrs[ndts_tmp++] = tid;
@@ -1073,35 +1073,10 @@ prepare(PG_FUNCTION_ARGS)
 	}
 
 	if (ndts_tmp != ndts)
-		elog(ERROR, ";lkjasd;ja;sldkjflkjd");
+		elog(ERROR, "ndts_tmp %lu ndts %lu", ndts_tmp, ndts);
 
 	if (nidx_tmp != nidx)
-		elog(ERROR, ";alkdsj;alksjdf;lakjd;fljs;dklfjas;kljfdas;kljfs;lkjdlfkj");
-
-	/*
-	for (BlockNumber blkno = 0; blkno < maxblk; blkno++)
-	{
-		int ndt_per_page = 0;
-
-		for (OffsetNumber off = 1; off <= (maxoff); off++)
-		{
-			ItemPointerData tid;
-
-			ItemPointerSetBlockNumber(&tid, blkno);
-			ItemPointerSetOffsetNumber(&tid, off);
-
-			if (blkno % dt_page_interval == 0 &&
-				off % dt_page_interval_in_page == 0 &&
-				ndt_per_page <= dt_per_page)
-			{
-				ndt_per_page++;
-				DeadTuples_orig->itemptrs[ndts++] = tid;
-			}
-
-			IndexTids_cache->itemptrs[nidx++] = tid;
-		}
-	}
-	*/
+		elog(ERROR, "nidx_tmp %lu nidx %lu", nidx_tmp, nidx);
 
 	/* Shuffle index tuples */
 	if (shuffle)
