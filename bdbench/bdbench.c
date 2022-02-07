@@ -17,6 +17,7 @@
 #include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
+#include "common/pg_prng.h"
 
 #include "vtbm.h"
 #include "rtbm.h"
@@ -221,9 +222,9 @@ update_info(DeadTupleInfo *info, uint64 nitems, BlockNumber minblk,
 
 /* from geqo's init_tour(), geqo_randint() */
 static int
-shuffle_randrange(unsigned short xseed[3], int lower, int upper)
+shuffle_randrange(pg_prng_state *state, int lower, int upper)
 {
-	return (int) floor( pg_erand48(xseed) * ((upper-lower)+0.999999)) + lower;
+	return (int) floor(pg_prng_double(state) * ((upper-lower)+0.999999)) + lower;
 }
 
 /* Naive Fisher-Yates implementation*/
@@ -231,11 +232,13 @@ static void
 shuffle_itemptrs(uint64 nitems, ItemPointer itemptrs)
 {
 	/* reproducability */
-	unsigned short xseed[3] = {0};
+	pg_prng_state state;
+
+	pg_prng_seed(&state, 0);
 
 	for (int i = 0; i < nitems - 1; i++)
 	{
-		int j = shuffle_randrange(xseed, i, nitems - 1);
+		int j = shuffle_randrange(&state, i, nitems - 1);
 		ItemPointerData t = itemptrs[j];
 
 		itemptrs[j] = itemptrs[i];
@@ -454,8 +457,8 @@ tbm_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 static bool
 tbm_reaped(LVTestType *lvtt, ItemPointer itemptr)
 {
-	return tbm_is_member((TIDBitmap *) lvtt->private, itemptr);
-	//return true;
+	//return tbm_is_member((TIDBitmap *) lvtt->private, itemptr);
+	return true;
 }
 static Size
 tbm_mem_usage(LVTestType *lvtt)
