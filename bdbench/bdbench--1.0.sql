@@ -48,7 +48,7 @@ dt_interval_in_page bigint,
 dt_consecutives bigint,
 dt_interval int,
 shuffle bool default true)
-RETURNS text
+RETURNS void
 AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT VOLATILE;
 
@@ -62,7 +62,7 @@ LANGUAGE C STRICT VOLATILE;
 
 CREATE FUNCTION attach_dead_tuples(
 mode text)
-RETURNS text
+RETURNS void
 AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT VOLATILE;
 

@@ -23,6 +23,7 @@
 #include "rtbm.h"
 #include "radix.h"
 #include "svtm.h"
+#include "radix_tree.h"
 
 //#define DEBUG_DUMP_MATCHED 1
 
@@ -160,6 +161,14 @@ static bool svtm_reaped(LVTestType *lvtt, ItemPointer itemptr);
 static Size svtm_mem_usage(LVTestType *lvtt);
 static void svtm_load(SVTm *tbm, ItemPointerData *itemptrs, int nitems);
 
+/* radix_tree */
+static void radix_tree_init(LVTestType *lvtt, uint64 nitems);
+static void radix_tree_fini(LVTestType *lvtt);
+static void radix_tree_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+							  BlockNumber maxblk, OffsetNumber maxoff);
+static bool radix_tree_reaped(LVTestType *lvtt, ItemPointer itemptr);
+static Size radix_tree_mem_usage(LVTestType *lvtt);
+static void radix_tree_load(void *tbm, ItemPointerData *itemptrs, int nitems);
 
 /* Misc functions */
 static void generate_index_tuples(uint64 nitems, BlockNumber minblk,
@@ -186,7 +195,7 @@ static void load_rtbm(RTbm *vtbm, ItemPointerData *itemptrs, int nitems);
 		.mem_usage_fn = n##_mem_usage, \
 			}
 
-#define TEST_SUBJECT_TYPES 7
+#define TEST_SUBJECT_TYPES 8
 static LVTestType LVTestSubjects[TEST_SUBJECT_TYPES] =
 {
 	DECLARE_SUBJECT(array),
@@ -195,7 +204,8 @@ static LVTestType LVTestSubjects[TEST_SUBJECT_TYPES] =
 	DECLARE_SUBJECT(vtbm),
 	DECLARE_SUBJECT(rtbm),
 	DECLARE_SUBJECT(radix),
-	DECLARE_SUBJECT(svtm)
+	DECLARE_SUBJECT(svtm),
+	DECLARE_SUBJECT(radix_tree),
 };
 
 static bool
@@ -685,7 +695,7 @@ radix_to_key_off(ItemPointer tid, uint32 *off)
 
 	Assert(*off < 64);
 
-	return upper;
+	return tid_i;
 }
 
 static void
@@ -846,6 +856,90 @@ svtm_load(SVTm *svtm, ItemPointerData *itemptrs, int nitems)
 	svtm_finalize_addition(svtm);
 }
 
+/* ---------- radix_tree ---------- */
+static void
+radix_tree_init(LVTestType *lvtt, uint64 nitems)
+{
+	MemoryContext old_ctx;
+
+	lvtt->mcxt = AllocSetContextCreate(TopMemoryContext,
+									   "radix_tree bench",
+									   ALLOCSET_DEFAULT_SIZES);
+	old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
+	lvtt->private = radix_tree_create(lvtt->mcxt);
+	MemoryContextSwitchTo(old_ctx);
+}
+static void
+radix_tree_fini(LVTestType *lvtt)
+{
+#if 0
+	if (lvtt->private)
+		radix_tree_destroy((radix_tree *) llvt->private);
+#endif
+}
+
+static void
+radix_tree_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+				  BlockNumber maxblk, OffsetNumber maxoff)
+{
+	MemoryContext oldcontext = MemoryContextSwitchTo(lvtt->mcxt);
+
+	radix_tree_load(lvtt->private,
+					DeadTuples_orig->itemptrs,
+					DeadTuples_orig->dtinfo.nitems);
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+
+static bool
+radix_tree_reaped(LVTestType *lvtt, ItemPointer itemptr)
+{
+	uint64 key;
+	uint32 off;
+	bfm_value_type val;
+	bool found = false;
+
+	key = radix_to_key_off(itemptr, &off);
+
+	radix_tree_search((radix_tree *) lvtt->private, key, &found);
+
+	return found;
+}
+
+static uint64
+radix_tree_mem_usage(LVTestType *lvtt)
+{
+	radix_tree *tree = (radix_tree *) lvtt->private;
+	size_t mem = MemoryContextMemAllocated(lvtt->mcxt, true);
+
+	radix_tree_stats(tree);
+
+	ereport(NOTICE,
+			errmsg("radix tree of %.2f MB",
+				   (double) mem / (1024 * 1024)),
+			errhidestmt(true),
+			errhidecontext(true));
+
+	return mem;
+}
+
+static void
+radix_tree_load(void *tbm, ItemPointerData *itemptrs, int nitems)
+{
+	radix_tree *root = (radix_tree *) tbm;
+
+	for (int i = 0; i < nitems; i++)
+	{
+		ItemPointer tid = &(itemptrs[i]);
+		uint64 key;
+		uint32 off;
+
+		key = radix_to_key_off(tid, &off);
+
+		radix_tree_insert(root, key, Int32GetDatum(100));
+	}
+}
 
 static void
 attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk, BlockNumber maxblk,
@@ -921,11 +1015,13 @@ _bench(LVTestType *lvtt)
 			 matched, lvtt->dtinfo.nitems);
 
 	elog(NOTICE, "\"%s\": dead tuples %lu, index tuples %lu, matched %lu, mem %zu",
+//	elog(NOTICE, "\"%s\": dead tuples %lu, index tuples %lu, matched %lu, mem %.2f",
 		 lvtt->name,
 		 lvtt->dtinfo.nitems,
 		 IndexTids_cache->dtinfo.nitems,
 		 matched,
 		 lvtt->mem_usage_fn(lvtt));
+//		 (double) lvtt->mem_usage_fn(lvtt) / (1024 * 1024));
 }
 
 /* SQL-callable functions */
@@ -1090,7 +1186,7 @@ prepare(PG_FUNCTION_ARGS)
 	DeadTuples_orig->dtinfo.nitems = ndts;
 	IndexTids_cache->dtinfo.nitems = nidx;
 
-	PG_RETURN_NULL();
+	PG_RETURN_VOID();
 }
 
 Datum
@@ -1120,7 +1216,7 @@ attach_dead_tuples(PG_FUNCTION_ARGS)
 		}
 	}
 
-	PG_RETURN_NULL();
+	PG_RETURN_VOID();
 }
 
 Datum
@@ -1228,7 +1324,73 @@ rtbm_test(PG_FUNCTION_ARGS)
 Datum
 radix_run_tests(PG_FUNCTION_ARGS)
 {
-	bfm_tests();
+	LVTestType *tree1;
+	LVTestType *tree2;
+	uint64 nmatched1 = 0, nmatched2 = 0;
+
+	DirectFunctionCall6(prepare,
+						Int64GetDatum(1000000),
+						Int32GetDatum(10),
+						Int32GetDatum(1),
+						Int32GetDatum(1),
+						Int32GetDatum(20),
+						BoolGetDatum(true));
+
+	DirectFunctionCall1(attach_dead_tuples,
+						CStringGetDatum(cstring_to_text("intset")));
+	DirectFunctionCall1(attach_dead_tuples,
+						CStringGetDatum(cstring_to_text("radix_tree")));
+
+	tree1 = &(LVTestSubjects[2]);
+	tree2 = &(LVTestSubjects[7]);
+
+	elog(NOTICE, "tree1 name %s", tree1->name);
+	elog(NOTICE, "tree2 name %s", tree2->name);
+
+	for (int i = 0; i < IndexTids_cache->dtinfo.nitems; i++)
+	{
+		bool match1, match2;
+
+		CHECK_FOR_INTERRUPTS();
+
+		match1 = tree1->reaped_fn(tree1, &(IndexTids_cache->itemptrs[i]));
+		match2 = tree2->reaped_fn(tree2, &(IndexTids_cache->itemptrs[i]));
+
+		if (match1)
+			nmatched1++;
+		if (match2)
+			nmatched2++;
+
+		if (match1 != match2)
+		{
+			uint64 key;
+			uint32 dummy;
+
+			key = radix_to_key_off(&(IndexTids_cache->itemptrs[i]), &dummy);
+
+			elog(NOTICE, "ERR: tid = (%u,%u) key = %lX intset = %s radix = %s",
+				 ItemPointerGetBlockNumber(&(IndexTids_cache->itemptrs[i])),
+				 ItemPointerGetOffsetNumber(&(IndexTids_cache->itemptrs[i])),
+				 key,
+				 match1 ? "OK" : "NG",
+				 match2 ? "OK" : "NG");
+		}
+	}
+
+	elog(NOTICE, "RES: bfm matched = %lu radix matched = %lu",
+		 nmatched1, nmatched2);
+
+	ItemPointerData item;
+	uint64 ikey;
+	uint32 dummy;
+
+	ItemPointerSetBlockNumber(&item, 60);
+	ItemPointerSetOffsetNumber(&item, 6);
+	ikey = radix_to_key_off(&item, &dummy);
+
+	tree2->reaped_fn(tree2, &item);
+
+	tree2->mem_usage_fn(tree2);
 
 	PG_RETURN_VOID();
 }
