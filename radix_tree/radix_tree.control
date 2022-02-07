@@ -1,0 +1,5 @@
+# radix_tree extension
+comment = 'radix_tree test'
+default_version = '1.0'
+module_pathname = '$libdir/radix_tree'
+relocatable = true
