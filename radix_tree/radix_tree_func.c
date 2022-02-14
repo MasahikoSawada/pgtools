@@ -23,29 +23,37 @@ PG_FUNCTION_INFO_V1(run_test);
 static void test_insert_search(radix_tree *rt, uint64 key, Datum val, int i);
 
 static void
-test_insert_search(radix_tree *rt, uint64 key, Datum val, int i)
+test_search(radix_tree *tree, uint64 key, int i, StringInfo buf)
 {
 	bool found;
 	Datum ret;
-	char buf[256] = {0};
 
-	sprintf(buf, "[%d] test key %016lX val %d ... ",
+	ret = radix_tree_search(tree, key, &found);
+
+	if (found)
+		appendStringInfo(buf, "ok (ret=%d)", DatumGetInt32(ret));
+	else
+		appendStringInfo(buf, "ng (ret=%d)", DatumGetInt32(ret));
+
+	elog(NOTICE, "%s", buf->data);
+
+	Assert(found);
+	Assert(DatumGetInt32(100) == DatumGetInt32(ret));
+}
+
+static void
+test_insert_search(radix_tree *rt, uint64 key, Datum val, int i)
+{
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+
+	appendStringInfo(&buf, "[%d] insert-search test key %016lX val %d ... ",
 			i, key, DatumGetInt32(val));
 
 	radix_tree_insert(rt, key, val);
-	ret = radix_tree_search(rt, key, &found);
 
-	if (found)
-		sprintf(buf + strlen(buf) - 1, "ok (ret=%d)",
-				DatumGetInt32(ret));
-	else
-		sprintf(buf + strlen(buf) - 1, "ng (ret=%d)",
-				DatumGetInt32(ret));
-
-	elog(NOTICE, "%s", buf);
-
-	Assert(found);
-	Assert(DatumGetInt32(val) == DatumGetInt32(ret));
+	test_search(rt, key, i, &buf);
 }
 
 static uint64
@@ -62,13 +70,28 @@ static void
 test_mask(uint64 mask, int n)
 {
 	radix_tree *tree = radix_tree_create(CurrentMemoryContext);
+	uint64 *keys;
+
+	keys = (uint64 *) palloc(sizeof(uint64) * n);
 
 	for (int i = 0; i < n; i++)
 	{
 		uint64 key = rand_uint64();
 
 		key &= mask;
+
+		keys[i] = key;
 		test_insert_search(tree, key, Int32GetDatum(100), i);
+	}
+
+	for (int i = 0; i < n; i++)
+	{
+		StringInfoData buf;
+		initStringInfo(&buf);
+
+		appendStringInfo(&buf, "[%d] search test key %016lX ... ",
+						 i, keys[i]);
+		test_search(tree, keys[i], i, &buf);
 	}
 
 	radix_tree_destroy(tree);
@@ -97,26 +120,13 @@ test_set(uint64 *keys, int nkeys)
 	elog(NOTICE, "search test ...");
 	for (int i = 0; i < nkeys; i++)
 	{
-		char buf[256] = {0};
-		bool found;
-		Datum ret;
+		StringInfoData buf;
 
-		ret = radix_tree_search(tree, keys[i], &found);
+		initStringInfo(&buf);
+		appendStringInfo(&buf, "[%d] search test key %016lX ... ",
+						 i, keys[i]);
 
-		sprintf(buf, "[%d] test key %016lX ... ",
-				i, keys[i]);
-
-		if (found)
-			sprintf(buf + strlen(buf) - 1, "ok (ret=%d)",
-					DatumGetInt32(ret));
-		else
-			sprintf(buf + strlen(buf) - 1, "ng (ret=%d)",
-					DatumGetInt32(ret));
-
-		elog(NOTICE, "%s", buf);
-
-		Assert(found);
-		Assert(DatumGetInt32(100) == DatumGetInt32(ret));
+		test_search(tree, keys[i], i, &buf);
 	}
 
 	radix_tree_destroy(tree);
@@ -129,7 +139,6 @@ run_test(PG_FUNCTION_ARGS)
 
 	tree = radix_tree_create(CurrentMemoryContext);
 
-	/*
 	test_mask(0xFFFFFFFFFFFFFF00, 1000000);
 	test_mask(0xFFFFFFFFFFFF00FF, 1000000);
 	test_mask(0xFFFFFFFFFF00FFFF, 1000000);
@@ -143,9 +152,8 @@ run_test(PG_FUNCTION_ARGS)
 	test_mask(0xFFFFFFFF00000000, 1000000);
 	test_mask(0xFFFFFF0000000000, 1000000);
 	test_mask(0xFFFFFF00000000FF, 1000000);
-	*/
 
-	//test_sequence(10000000);
+	test_sequence(10000000);
 
 	uint64 keys[] = {
 		0x00000000000000AA,

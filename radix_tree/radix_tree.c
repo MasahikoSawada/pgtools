@@ -11,8 +11,13 @@
 #define RADIX_TREE_CHUNK_MASK ((1 << RADIX_TREE_NODE_FANOUT) - 1)
 #define RADIX_TREE_MAX_SHIFT key_get_shift(UINT64_MAX)
 
-#define IsLeaf(n) (((radix_tree_node *) (n))->shift == 0)
-#define Node48IdxIsUsed(idx) (idx == ((1 << 8) - 1))
+#define NodeIsLeaf(n) (((radix_tree_node *) (n))->shift == 0)
+#define NodeHasFreeSlot(n) \
+	(((radix_tree_node *) (n))->count < \
+	 radix_tree_node_info[((radix_tree_node *) (n))->kind].max_slots)
+
+#define GET_KEY_CHUNK(key, shift) \
+	((uint8) (((key) >> (shift)) & RADIX_TREE_CHUNK_MASK))
 
 typedef enum radix_tree_node_kind
 {
@@ -37,7 +42,6 @@ typedef struct radix_tree_node_4
 
 	uint8	chunks[4];
 	Datum	slots[4];
-	//radix_tree_node *slots[4];
 } radix_tree_node_4;
 
 typedef struct radix_tree_node_16
@@ -46,7 +50,6 @@ typedef struct radix_tree_node_16
 
 	uint8	chunks[16];
 	Datum slots[16];
-	//radix_tree_node *slots[16];
 } radix_tree_node_16;
 
 typedef struct radix_tree_node_48
@@ -55,7 +58,6 @@ typedef struct radix_tree_node_48
 
 	uint8	slot_idxs[255];
 	Datum slots[48];
-	//radix_tree_node *slots[48];
 } radix_tree_node_48;
 
 typedef struct radix_tree_node_256
@@ -63,13 +65,12 @@ typedef struct radix_tree_node_256
 	radix_tree_node n;
 
 	Datum	slots[256];
-	//radix_tree_node *slots[256];
 } radix_tree_node_256;
 
 typedef struct radix_tree_node_info_elem
 {
 	const char *name;
-	int		nslots;
+	int		max_slots;
 	Size	size;
 } radix_tree_node_info_elem;
 
@@ -104,10 +105,6 @@ static radix_tree_node *radix_tree_insert_child(radix_tree *tree, radix_tree_nod
 												uint64 key);
 static void radix_tree_insert_val(radix_tree *tree, radix_tree_node *parent, radix_tree_node *node,
 								  uint64 key, Datum val);
-
-#define GET_KEY_CHUNK(key, shift) \
-	((uint8) (((key) >> (shift)) & RADIX_TREE_CHUNK_MASK))
-
 /*
  * Return the shift that is satisfied to store the given key.
  */
@@ -170,12 +167,11 @@ radix_tree_extend(radix_tree *tree, uint64 key)
 
 	max_shift = key_get_shift(key);
 
-	/* Grow from 'shift' to 'max_shift' */
+	/* Grow tree from 'shift' to 'max_shift' */
 	while (shift <= max_shift)
 	{
 		radix_tree_node_4 *node =
 			(radix_tree_node_4 *) radix_tree_alloc_node(tree, RADIX_TREE_NODE_KIND_4);
-		uint8	chunk = GET_KEY_CHUNK(key, shift);
 
 		node->n.count = 1;
 		node->n.shift = shift;
@@ -222,6 +218,9 @@ radix_tree_find_slot_ptr(radix_tree_node *node, uint8 chunk)
 			radix_tree_node_4 *n4 = (radix_tree_node_4 *) node;
 			for (int i = 0; i < n4->n.count; i++)
 			{
+				if (n4->chunks[i] > chunk)
+					break;
+
 				if (n4->chunks[i] == chunk)
 					return &(n4->slots[i]);
 			}
@@ -235,6 +234,9 @@ radix_tree_find_slot_ptr(radix_tree_node *node, uint8 chunk)
 			radix_tree_node_16 *n16 = (radix_tree_node_16 *) node;
 			for (int i = 0; i < n16->n.count; i++)
 			{
+				if (n16->chunks[i] > chunk)
+					break;
+
 				if (n16->chunks[i] == chunk)
 					return &(n16->slots[i]);
 			}
@@ -283,7 +285,6 @@ radix_tree_replace_slot(radix_tree_node *parent, radix_tree_node *node, uint8 ch
 static void
 radix_tree_new_root(radix_tree *tree, uint64 key, Datum val)
 {
-	int chunk = key & RADIX_TREE_CHUNK_MASK;
 	radix_tree_node_4 * n4 =
 		(radix_tree_node_4 * ) radix_tree_alloc_node(tree, RADIX_TREE_NODE_KIND_4);
 	int shift = key_get_shift(key);
@@ -300,7 +301,7 @@ radix_tree_insert_child(radix_tree *tree, radix_tree_node *parent, radix_tree_no
 	radix_tree_node *newchild =
 		(radix_tree_node *) radix_tree_alloc_node(tree, RADIX_TREE_NODE_KIND_4);
 
-	Assert(!IsLeaf(node));
+	Assert(!NodeIsLeaf(node));
 
 	newchild->shift = node->shift - RADIX_TREE_NODE_FANOUT;
 	newchild->chunk = GET_KEY_CHUNK(key, node->shift);
@@ -310,6 +311,9 @@ radix_tree_insert_child(radix_tree *tree, radix_tree_node *parent, radix_tree_no
 	return (radix_tree_node *) newchild;
 }
 
+/*
+ * Insert the value to the node. The node grows if it's full.
+ */
 static void
 radix_tree_insert_val(radix_tree *tree, radix_tree_node *parent, radix_tree_node *node,
 					  uint64 key, Datum val)
@@ -322,10 +326,24 @@ radix_tree_insert_val(radix_tree *tree, radix_tree_node *parent, radix_tree_node
 		{
 			radix_tree_node_4 *n4 = (radix_tree_node_4 *) node;
 
-			if (n4->n.count < 4)
+			if (NodeHasFreeSlot(n4))
 			{
-				n4->chunks[n4->n.count] = chunk;
-				n4->slots[n4->n.count] = val;
+				int i;
+
+				for (i = 0; i < n4->n.count; i++)
+				{
+					if (n4->chunks[i] > chunk)
+					{
+						memmove(&(n4->chunks[i + 1]), &(n4->chunks[i]),
+								sizeof(uint8) * (n4->n.count - i));
+						memmove(&(n4->slots[i + 1]), &(n4->slots[i]),
+								sizeof(radix_tree_node *) * (n4->n.count - i));
+						break;
+					}
+				}
+
+				n4->chunks[i] = chunk;
+				n4->slots[i] = val;
 				break;
 			}
 
@@ -337,9 +355,10 @@ radix_tree_insert_val(radix_tree *tree, radix_tree_node *parent, radix_tree_node
 		{
 			radix_tree_node_16 *n16 = (radix_tree_node_16 *) node;
 
-			if (n16->n.count < 16)
+			if (NodeHasFreeSlot(n16))
 			{
 				int i;
+
 				for (i = 0; i < n16->n.count; i++)
 				{
 					if (n16->chunks[i] > chunk)
@@ -365,7 +384,7 @@ radix_tree_insert_val(radix_tree *tree, radix_tree_node *parent, radix_tree_node
 		{
 			radix_tree_node_48 *n48 = (radix_tree_node_48 *) node;
 
-			if (n48->n.count < 48)
+			if (NodeHasFreeSlot(n48))
 			{
 				uint8 pos = n48->n.count + 1;
 				n48->slot_idxs[chunk] = pos;
@@ -381,22 +400,25 @@ radix_tree_insert_val(radix_tree *tree, radix_tree_node *parent, radix_tree_node
 		{
 			radix_tree_node_256 *n256 = (radix_tree_node_256 *) node;
 
-			Assert(n256->n.count <= 255);
+			Assert(NodeHasFreeSlot(n256));
 			n256->slots[chunk] = val;
 			break;
 		}
 	}
 
-	if (node->count < 255)
-		node->count++;
+	node->count++;
 }
 
-
-
+/*
+ * Change the node type to a larger one.
+ */
 static radix_tree_node *
 radix_tree_node_grow(radix_tree *tree, radix_tree_node *parent, radix_tree_node *node)
 {
 	radix_tree_node *newnode;
+
+	Assert(node->count ==
+		   radix_tree_node_info[node->kind].max_slots);
 
 	switch (node->kind)
 	{
@@ -406,14 +428,13 @@ radix_tree_node_grow(radix_tree *tree, radix_tree_node *parent, radix_tree_node 
 			radix_tree_node_16 *new16 =
 				(radix_tree_node_16 *) radix_tree_alloc_node(tree, RADIX_TREE_NODE_KIND_16);
 
-			Assert(n4->n.count == 4);
-
 			radix_tree_copy_node_common((radix_tree_node *) n4,
 										(radix_tree_node *) new16);
 
 			memcpy(&(new16->chunks), &(n4->chunks), sizeof(uint8) * 4);
 			memcpy(&(new16->slots), &(n4->slots), sizeof(Datum) * 4);
 
+			/* Sort slots and chunks arrays */
 			for (int i = 0; i < n4->n.count ; i++)
 			{
 				for (int j = i; j < n4->n.count; j++)
@@ -426,14 +447,6 @@ radix_tree_node_grow(radix_tree *tree, radix_tree_node *parent, radix_tree_node 
 				}
 			}
 
-			/* TEST */
-			{
-				for (int i = 1; i < new16->n.count; i++)
-					Assert(new16->chunks[i - 1] < new16->chunks[i]);
-			}
-
-			/* @@@ sort chunks */
-
 			newnode = (radix_tree_node *) new16;
 			break;
 		}
@@ -442,8 +455,6 @@ radix_tree_node_grow(radix_tree *tree, radix_tree_node *parent, radix_tree_node 
 			radix_tree_node_16 *n16 = (radix_tree_node_16 *) node;
 			radix_tree_node_48 *new48 =
 				(radix_tree_node_48 *) radix_tree_alloc_node(tree,RADIX_TREE_NODE_KIND_48);
-
-			Assert(n16->n.count == 16);
 
 			radix_tree_copy_node_common((radix_tree_node *) n16,
 										(radix_tree_node *) new48);
@@ -472,8 +483,6 @@ radix_tree_node_grow(radix_tree *tree, radix_tree_node *parent, radix_tree_node 
 			radix_tree_node_48 *n48 = (radix_tree_node_48 *) node;
 			radix_tree_node_256 *new256 =
 				(radix_tree_node_256 *) radix_tree_alloc_node(tree,RADIX_TREE_NODE_KIND_256);
-
-			Assert(n48->n.count == 48);
 
 			radix_tree_copy_node_common((radix_tree_node *) n48,
 										(radix_tree_node *) new256);
@@ -549,15 +558,15 @@ radix_tree_insert(radix_tree *tree, uint64 key, Datum val)
 	int shift;
 	radix_tree_node *node;
 	radix_tree_node *parent = tree->root;
-	bool leaf_inserted = false;
 
 	/* stats */
 	tree->nkeys++;
 
-	/* Empty tree, create new leaf node as the root */
+	/* Empty tree, create the root */
 	if (!tree->root)
 		radix_tree_new_root(tree, key, val);
 
+	/* Extend the tree if necessary */
 	if (key > tree->max_val)
 		radix_tree_extend(tree, key);
 
@@ -580,7 +589,7 @@ radix_tree_insert(radix_tree *tree, uint64 key, Datum val)
 	}
 
 	/* arrived at a leaf */
-	Assert(IsLeaf(node));
+	Assert(NodeIsLeaf(node));
 
 	radix_tree_insert_val(tree, parent, node, key, val);
 
@@ -602,7 +611,7 @@ radix_tree_search(radix_tree *tree, uint64 key, bool *found)
 	{
 		radix_tree_node *child;
 
-		if (IsLeaf(node))
+		if (NodeIsLeaf(node))
 		{
 			Datum *slot_ptr;
 			int chunk = GET_KEY_CHUNK(key, node->shift);
@@ -669,10 +678,10 @@ radix_tree_print_slot(StringInfo buf, uint8 chunk, Datum slot, int idx, bool is_
 static void
 radix_tree_dump_node(radix_tree_node *node, int level, StringInfo buf)
 {
-	bool is_leaf = IsLeaf(node);
+	bool is_leaf = NodeIsLeaf(node);
 
 	appendStringInfo(buf, "[\"%s\" type %d, cnt %u, shift %u, chunk \"%X\"] chunks:\n",
-					 IsLeaf(node) ? "LEAF" : "INTR",
+					 NodeIsLeaf(node) ? "LEAF" : "INTR",
 					 (node->kind == RADIX_TREE_NODE_KIND_4) ? 4 :
 					 (node->kind == RADIX_TREE_NODE_KIND_16) ? 16 :
 					 (node->kind == RADIX_TREE_NODE_KIND_48) ? 48 : 256,
