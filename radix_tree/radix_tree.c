@@ -9,6 +9,7 @@
 
 #define RADIX_TREE_NODE_FANOUT	8
 #define RADIX_TREE_CHUNK_MASK ((1 << RADIX_TREE_NODE_FANOUT) - 1)
+#define RADIX_TREE_MAX_SHIFT key_get_shift(UINT64_MAX)
 
 #define IsLeaf(n) (((radix_tree_node *) (n))->shift == 0)
 #define Node48IdxIsUsed(idx) (idx == ((1 << 8) - 1))
@@ -107,13 +108,27 @@ static void radix_tree_insert_val(radix_tree *tree, radix_tree_node *parent, rad
 #define GET_KEY_CHUNK(key, shift) \
 	((uint8) (((key) >> (shift)) & RADIX_TREE_CHUNK_MASK))
 
-static int
-key_get_max_shift(uint64 key)
+/*
+ * Return the shift that is satisfied to store the given key.
+ */
+inline static int
+key_get_shift(uint64 key)
 {
 	return (key == 0)
 		? 0
-		: ((pg_leftmost_one_pos64(key) + RADIX_TREE_NODE_FANOUT) / RADIX_TREE_NODE_FANOUT) * RADIX_TREE_NODE_FANOUT;
-	//return pg_nextpower2_64(pg_leftmost_one_pos64(key));
+		: (pg_leftmost_one_pos64(key) / RADIX_TREE_NODE_FANOUT) * RADIX_TREE_NODE_FANOUT;
+}
+
+/*
+ * Return the max value stored in a node with the given shift.
+ */
+static uint64
+shift_get_max_val(int shift)
+{
+	if (shift == RADIX_TREE_MAX_SHIFT)
+		return UINT64_MAX;
+
+	return (UINT64_C(1) << (shift + RADIX_TREE_NODE_FANOUT)) - 1;
 }
 
 static radix_tree_node *
@@ -153,7 +168,7 @@ radix_tree_extend(radix_tree *tree, uint64 key)
 	int max_shift;
 	int shift = tree->root->shift + RADIX_TREE_NODE_FANOUT;
 
-	max_shift = key_get_max_shift(key);
+	max_shift = key_get_shift(key);
 
 	/* Grow from 'shift' to 'max_shift' */
 	while (shift <= max_shift)
@@ -165,19 +180,17 @@ radix_tree_extend(radix_tree *tree, uint64 key)
 		node->n.count = 1;
 		node->n.shift = shift;
 		node->chunks[0] = 0;
+		node->slots[0] = PointerGetDatum(tree->root);
 
 		tree->root->chunk = 0;
-		node->slots[0] = PointerGetDatum(tree->root);
 		tree->root = (radix_tree_node *) node;
-
-		if (shift == 64)
-			tree->max_val = UINT64_MAX;
-		else
-			tree->max_val = (UINT64_C(1) << (shift + RADIX_TREE_NODE_FANOUT)) - 1;
 
 		shift += RADIX_TREE_NODE_FANOUT;
 	}
+
+	tree->max_val = shift_get_max_val(max_shift);
 }
+
 
 /*
  * Return the pointer to the child node corresponding with the key. Otherwise (if
@@ -263,18 +276,20 @@ radix_tree_replace_slot(radix_tree_node *parent, radix_tree_node *node, uint8 ch
 	*slot_ptr = PointerGetDatum(node);
 }
 
+/*
+ * Create a new node as the root. Subordinate nodes will be created during
+ * the insertion.
+ */
 static void
 radix_tree_new_root(radix_tree *tree, uint64 key, Datum val)
 {
 	int chunk = key & RADIX_TREE_CHUNK_MASK;
 	radix_tree_node_4 * n4 =
 		(radix_tree_node_4 * ) radix_tree_alloc_node(tree, RADIX_TREE_NODE_KIND_4);
+	int shift = key_get_shift(key);
 
-	n4->n.count = 1;
-	n4->chunks[0] = chunk;
-	n4->slots[0] = val;
-
-	tree->max_val = (1 << RADIX_TREE_NODE_FANOUT) - 1;
+	n4->n.shift = shift;
+	tree->max_val = shift_get_max_val(shift);
 	tree->root = (radix_tree_node *) n4;
 }
 
@@ -541,19 +556,12 @@ radix_tree_insert(radix_tree *tree, uint64 key, Datum val)
 
 	/* Empty tree, create new leaf node as the root */
 	if (!tree->root)
-	{
 		radix_tree_new_root(tree, key, val);
-
-		leaf_inserted = true;
-	}
-
-	Assert(tree->root);
 
 	if (key > tree->max_val)
 		radix_tree_extend(tree, key);
 
-	if (leaf_inserted)
-		return true;
+	Assert(tree->root);
 
 	shift = tree->root->shift;
 	node = tree->root;

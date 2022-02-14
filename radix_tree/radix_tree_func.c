@@ -83,6 +83,45 @@ test_sequence(int n)
 		test_insert_search(tree, i, Int32GetDatum(100), i);
 }
 
+static void
+test_set(uint64 *keys, int nkeys)
+{
+	radix_tree *tree = radix_tree_create(CurrentMemoryContext);
+
+	elog(NOTICE, "insert and search test ...");
+	for (int i = 0; i < nkeys; i++)
+		test_insert_search(tree, keys[i], Int32GetDatum(100), i);
+
+	radix_tree_dump(tree);
+
+	elog(NOTICE, "search test ...");
+	for (int i = 0; i < nkeys; i++)
+	{
+		char buf[256] = {0};
+		bool found;
+		Datum ret;
+
+		ret = radix_tree_search(tree, keys[i], &found);
+
+		sprintf(buf, "[%d] test key %016lX ... ",
+				i, keys[i]);
+
+		if (found)
+			sprintf(buf + strlen(buf) - 1, "ok (ret=%d)",
+					DatumGetInt32(ret));
+		else
+			sprintf(buf + strlen(buf) - 1, "ng (ret=%d)",
+					DatumGetInt32(ret));
+
+		elog(NOTICE, "%s", buf);
+
+		Assert(found);
+		Assert(DatumGetInt32(100) == DatumGetInt32(ret));
+	}
+
+	radix_tree_destroy(tree);
+}
+
 Datum
 run_test(PG_FUNCTION_ARGS)
 {
@@ -106,7 +145,20 @@ run_test(PG_FUNCTION_ARGS)
 	test_mask(0xFFFFFF00000000FF, 1000000);
 	*/
 
-	test_sequence(10000000);
+	//test_sequence(10000000);
+
+	uint64 keys[] = {
+		0x00000000000000AA,
+		0x0000000000AA00AA,
+		0x000000AA000000AA,
+		0x000000AABB0000AA,
+		0x000000AACC00BBAA,
+		0xAA0000AACC00BBAA,
+		0xBB0000AACC00BBAA,
+		0x00CC00AACC00BBAA
+	};
+
+	test_set(keys, 8);
 
 	/*
 	radix_tree_insert(tree,
