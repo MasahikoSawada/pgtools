@@ -89,6 +89,8 @@ struct radix_tree
 	radix_tree_node	*root;
 	MemoryContextData *slabs[RADIX_TREE_NODE_KIND_COUNT];
 
+	uint64	num_entries;
+
 	/* stats */
 	int32	cnt[RADIX_TREE_NODE_KIND_COUNT];
 	uint64 nkeys;
@@ -528,6 +530,7 @@ radix_tree_create(MemoryContext ctx)
 	tree->max_val = 0;
 	tree->root = NULL;
 	tree->context = ctx;
+	tree->num_entries = 0;
 
 	/* stats */
 	tree->nkeys = 0;
@@ -592,6 +595,7 @@ radix_tree_insert(radix_tree *tree, uint64 key, Datum val)
 	Assert(NodeIsLeaf(node));
 
 	radix_tree_insert_val(tree, parent, node, key, val);
+	tree->num_entries++;
 
 	return true;
 }
@@ -639,6 +643,12 @@ radix_tree_search(radix_tree *tree, uint64 key, bool *found)
 not_found:
 	*found = false;
 	return (Datum) 0;
+}
+
+uint64
+radix_tree_num_entries(radix_tree *tree)
+{
+	return tree->num_entries;
 }
 
 void

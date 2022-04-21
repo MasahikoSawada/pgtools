@@ -18,12 +18,13 @@
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "common/pg_prng.h"
+#include "lib/radixtree.h"
 
 #include "vtbm.h"
 #include "rtbm.h"
 #include "radix.h"
 #include "svtm.h"
-#include "radix_tree.h"
+//#include "radix_tree.h"
 
 //#define DEBUG_DUMP_MATCHED 1
 
@@ -170,6 +171,14 @@ static bool radix_tree_reaped(LVTestType *lvtt, ItemPointer itemptr);
 static Size radix_tree_mem_usage(LVTestType *lvtt);
 static void radix_tree_load(void *tbm, ItemPointerData *itemptrs, int nitems);
 
+/* hash table */
+static void hash_init(LVTestType *lvtt, uint64 nitems);
+static void hash_fini(LVTestType *lvtt);
+static void hash_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+							  BlockNumber maxblk, OffsetNumber maxoff);
+static bool hash_reaped(LVTestType *lvtt, ItemPointer itemptr);
+static Size hash_mem_usage(LVTestType *lvtt);
+
 /* Misc functions */
 static void generate_index_tuples(uint64 nitems, BlockNumber minblk,
 								  BlockNumber maxblk, OffsetNumber maxoff);
@@ -195,7 +204,7 @@ static void load_rtbm(RTbm *vtbm, ItemPointerData *itemptrs, int nitems);
 		.mem_usage_fn = n##_mem_usage, \
 			}
 
-#define TEST_SUBJECT_TYPES 8
+#define TEST_SUBJECT_TYPES 9
 static LVTestType LVTestSubjects[TEST_SUBJECT_TYPES] =
 {
 	DECLARE_SUBJECT(array),
@@ -206,6 +215,7 @@ static LVTestType LVTestSubjects[TEST_SUBJECT_TYPES] =
 	DECLARE_SUBJECT(radix),
 	DECLARE_SUBJECT(svtm),
 	DECLARE_SUBJECT(radix_tree),
+	DECLARE_SUBJECT(hash),
 };
 
 static bool
@@ -467,8 +477,8 @@ tbm_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 static bool
 tbm_reaped(LVTestType *lvtt, ItemPointer itemptr)
 {
-	//return tbm_is_member((TIDBitmap *) lvtt->private, itemptr);
-	return true;
+	return tbm_is_member((TIDBitmap *) lvtt->private, itemptr);
+	//return true;
 }
 static Size
 tbm_mem_usage(LVTestType *lvtt)
@@ -503,7 +513,6 @@ intset_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 	for (int i = 0; i < lvtt->dtinfo.nitems; i++)
 		intset_add_member((IntegerSet *) lvtt->private,
 						  itemptr_encode(&DeadTuples_orig->itemptrs[i]));
-
 }
 static bool
 intset_reaped(LVTestType *lvtt, ItemPointer itemptr)
@@ -680,7 +689,6 @@ static uint64
 radix_to_key_off(ItemPointer tid, uint32 *off)
 {
 	uint64 upper;
-
 	uint32 shift = pg_ceil_log2_32(MaxHeapTuplesPerPage);
 	int64 tid_i;
 
@@ -897,7 +905,6 @@ radix_tree_reaped(LVTestType *lvtt, ItemPointer itemptr)
 {
 	uint64 key;
 	uint32 off;
-	bfm_value_type val;
 	bool found = false;
 
 	key = radix_to_key_off(itemptr, &off);
@@ -911,7 +918,7 @@ static uint64
 radix_tree_mem_usage(LVTestType *lvtt)
 {
 	radix_tree *tree = (radix_tree *) lvtt->private;
-	size_t mem = MemoryContextMemAllocated(lvtt->mcxt, true);
+	uint64 mem = radix_tree_memory_usage(tree);
 
 	radix_tree_stats(tree);
 
@@ -928,6 +935,7 @@ static void
 radix_tree_load(void *tbm, ItemPointerData *itemptrs, int nitems)
 {
 	radix_tree *root = (radix_tree *) tbm;
+	bool found;
 
 	for (int i = 0; i < nitems; i++)
 	{
@@ -937,8 +945,74 @@ radix_tree_load(void *tbm, ItemPointerData *itemptrs, int nitems)
 
 		key = radix_to_key_off(tid, &off);
 
-		radix_tree_insert(root, key, Int32GetDatum(100));
+		radix_tree_insert(root, key, Int32GetDatum(100), &found);
 	}
+}
+
+/* ---------- hash ---------- */
+static void
+hash_init(LVTestType *lvtt, uint64 nitems)
+{
+	MemoryContext old_ctx;
+	static HTAB *h;
+	HASHCTL ctl;
+
+	lvtt->mcxt = AllocSetContextCreate(TopMemoryContext,
+									   "hash bench",
+									   ALLOCSET_DEFAULT_SIZES);
+	old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
+
+	ctl.keysize = sizeof(ItemPointerData);
+	ctl.entrysize = sizeof(ItemPointerData);
+	ctl.hcxt = lvtt->mcxt;
+	h = hash_create("hash bench", nitems, &ctl,
+					HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	lvtt->private = (void *) h;
+	MemoryContextSwitchTo(old_ctx);
+}
+static void
+hash_fini(LVTestType *lvtt)
+{
+#if 0
+	if (lvtt->private)
+		radix_tree_destroy((radix_tree *) llvt->private);
+#endif
+}
+
+static void
+hash_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+				  BlockNumber maxblk, OffsetNumber maxoff)
+{
+	MemoryContext oldcontext = MemoryContextSwitchTo(lvtt->mcxt);
+	HTAB *h = (HTAB *) lvtt->private;
+	bool found;
+
+	for (int i = 0; i < nitems; i++)
+	{
+		hash_search(h,
+					(void *) &(DeadTuples_orig->itemptrs[i]),
+					HASH_ENTER, &found);
+	}
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+
+static bool
+hash_reaped(LVTestType *lvtt, ItemPointer itemptr)
+{
+	bool found = false;
+	HTAB *h = (HTAB *) lvtt->private;
+
+	hash_search(h, (void *) itemptr, HASH_FIND, &found);
+
+	return found;
+}
+
+static uint64
+hash_mem_usage(LVTestType *lvtt)
+{
+	return MemoryContextMemAllocated(lvtt->mcxt, true);
 }
 
 static void
@@ -1126,6 +1200,10 @@ prepare(PG_FUNCTION_ARGS)
 	uint64 ndts_tmp = 0;
 	uint64 nidx_tmp = 0;
 
+	if (page_consecutives > page_interval)
+		elog(ERROR, "cannot prepare %lu consecutive dirty pages at %lu pages interval",
+			 page_consecutives, page_interval);
+
 	ndts = ((uint64) ceil((double)maxblk / page_interval) * page_consecutives) * ndeadtuples_in_page;
 	DeadTuples_orig = MemoryContextAllocHuge(TopMemoryContext,
 											 sizeof(DeadTuplesArray));
@@ -1183,8 +1261,8 @@ prepare(PG_FUNCTION_ARGS)
 	if (shuffle)
 		shuffle_itemptrs(nidx, IndexTids_cache->itemptrs);
 
-	DeadTuples_orig->dtinfo.nitems = ndts;
-	IndexTids_cache->dtinfo.nitems = nidx;
+	DeadTuples_orig->dtinfo.nitems = Min(ndts, ndts_tmp);
+	IndexTids_cache->dtinfo.nitems = Min(nidx, nidx_tmp);
 
 	PG_RETURN_VOID();
 }
@@ -1215,6 +1293,8 @@ attach_dead_tuples(PG_FUNCTION_ARGS)
 			break;
 		}
 	}
+
+	elog(WARNING, "attached dead tuples to %s", mode);
 
 	PG_RETURN_VOID();
 }
