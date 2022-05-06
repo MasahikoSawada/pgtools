@@ -179,6 +179,14 @@ static void hash_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
 static bool hash_reaped(LVTestType *lvtt, ItemPointer itemptr);
 static Size hash_mem_usage(LVTestType *lvtt);
 
+/* radix_tree_kv */
+static void radix_tree_offnum_init(LVTestType *lvtt, uint64 nitems);
+static void radix_tree_offnum_fini(LVTestType *lvtt);
+static void radix_tree_offnum_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+							  BlockNumber maxblk, OffsetNumber maxoff);
+static bool radix_tree_offnum_reaped(LVTestType *lvtt, ItemPointer itemptr);
+static Size radix_tree_offnum_mem_usage(LVTestType *lvtt);
+
 /* Misc functions */
 static void generate_index_tuples(uint64 nitems, BlockNumber minblk,
 								  BlockNumber maxblk, OffsetNumber maxoff);
@@ -204,7 +212,7 @@ static void load_rtbm(RTbm *vtbm, ItemPointerData *itemptrs, int nitems);
 		.mem_usage_fn = n##_mem_usage, \
 			}
 
-#define TEST_SUBJECT_TYPES 9
+#define TEST_SUBJECT_TYPES 10
 static LVTestType LVTestSubjects[TEST_SUBJECT_TYPES] =
 {
 	DECLARE_SUBJECT(array),
@@ -216,6 +224,7 @@ static LVTestType LVTestSubjects[TEST_SUBJECT_TYPES] =
 	DECLARE_SUBJECT(svtm),
 	DECLARE_SUBJECT(radix_tree),
 	DECLARE_SUBJECT(hash),
+	DECLARE_SUBJECT(radix_tree_offnum),
 };
 
 static bool
@@ -688,6 +697,29 @@ radix_fini(LVTestType *lvtt)
 static uint64
 radix_to_key_off(ItemPointer tid, uint32 *off)
 {
+       uint64 upper;
+
+       uint32 shift = pg_ceil_log2_32(MaxHeapTuplesPerPage);
+       int64 tid_i;
+
+       Assert(ItemPointerGetOffsetNumber(tid) < MaxHeapTuplesPerPage);
+
+       tid_i = ItemPointerGetOffsetNumber(tid);
+       tid_i |= ItemPointerGetBlockNumber(tid) << shift;
+
+       *off = tid_i & ((1 << ENCODE_BITS)-1);
+       upper = tid_i >> ENCODE_BITS;
+       Assert(*off < (sizeof(bfm_value_type) * BITS_PER_BYTE));
+
+       Assert(*off < 64);
+
+       return upper;
+}
+
+/*
+static uint64
+radix_to_key_off(ItemPointer tid, uint32 *off)
+{
 	uint64 upper;
 	uint32 shift = pg_ceil_log2_32(MaxHeapTuplesPerPage);
 	int64 tid_i;
@@ -705,6 +737,7 @@ radix_to_key_off(ItemPointer tid, uint32 *off)
 
 	return tid_i;
 }
+*/
 
 static void
 radix_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
@@ -935,6 +968,8 @@ static void
 radix_tree_load(void *tbm, ItemPointerData *itemptrs, int nitems)
 {
 	radix_tree *root = (radix_tree *) tbm;
+	uint64 last_key = PG_UINT64_MAX;
+	uint64 val = 0;
 	bool found;
 
 	for (int i = 0; i < nitems; i++)
@@ -945,8 +980,147 @@ radix_tree_load(void *tbm, ItemPointerData *itemptrs, int nitems)
 
 		key = radix_to_key_off(tid, &off);
 
-		radix_tree_insert(root, key, Int32GetDatum(100), &found);
+		if (last_key != PG_UINT64_MAX &&
+			last_key != key)
+		{
+			radix_tree_insert(root, last_key, Int64GetDatum(val), &found);
+			val = 0;
+		}
+
+		last_key = key;
+		val |= (uint64)1 << off;
 	}
+
+	if (last_key != PG_UINT64_MAX)
+	{
+		radix_tree_insert(root, last_key, Int64GetDatum(val), &found);
+	}
+}
+
+/* ---------- radix_tree_offnum ---------- */
+static uint64
+radix_tree_offnum_get_key(ItemPointer itemptr, OffsetNumber *offnum_p)
+{
+	BlockNumber blkno = ItemPointerGetBlockNumber(itemptr);
+	OffsetNumber offnum = ItemPointerGetOffsetNumber(itemptr);
+	uint64 key;
+
+	*offnum_p = offnum;
+
+	if (offnum > 63 * 4)
+		elog(ERROR, "unexpected offset number %u", offnum);
+	else if (offnum > 63 * 3)
+	{
+		key = (((uint64) blkno) << 1) | 0x03;
+		*offnum_p -= 63 * 3;
+	}
+	else if (offnum > 63 * 2)
+	{
+		key = (((uint64) blkno) << 1) | 0x02;
+		*offnum_p -= 63 * 2;
+	}
+	else if (offnum > 63 * 1)
+	{
+		key = (((uint64) blkno) << 1) | 0x01;
+		*offnum_p -= 63 * 1;
+	}
+	else
+	{
+		key = (((uint64) blkno) << 1) | 0x00;
+	}
+
+	return key;
+}
+
+static void
+radix_tree_offnum_init(LVTestType *lvtt, uint64 nitems)
+{
+	MemoryContext old_ctx;
+
+	lvtt->mcxt = AllocSetContextCreate(TopMemoryContext,
+									   "radix_tree bench",
+									   ALLOCSET_DEFAULT_SIZES);
+	old_ctx = MemoryContextSwitchTo(lvtt->mcxt);
+	lvtt->private = radix_tree_create(lvtt->mcxt);
+	MemoryContextSwitchTo(old_ctx);
+}
+static void
+radix_tree_offnum_fini(LVTestType *lvtt)
+{
+#if 0
+	if (lvtt->private)
+		radix_tree_destroy((radix_tree *) llvt->private);
+#endif
+}
+
+static void
+radix_tree_offnum_attach(LVTestType *lvtt, uint64 nitems, BlockNumber minblk,
+				  BlockNumber maxblk, OffsetNumber maxoff)
+{
+	radix_tree *root = (radix_tree *) lvtt->private;
+	MemoryContext oldcontext = MemoryContextSwitchTo(lvtt->mcxt);
+
+	for (int i = 0; i < nitems; i++)
+	{
+		uint64 key;
+		OffsetNumber offnum;
+		Datum d;
+		bool found;
+
+		key = radix_tree_offnum_get_key(&(DeadTuples_orig->itemptrs[i]),
+										&offnum);
+
+		d = radix_tree_search(root, (uint64) key, &found);
+
+		if (!found)
+			d = 1 << offnum;
+		else
+			d |= 1 << offnum;
+
+		radix_tree_insert(root, key, Int32GetDatum(d), &found);
+	}
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+
+static bool
+radix_tree_offnum_reaped(LVTestType *lvtt, ItemPointer itemptr)
+{
+	uint64 key;
+	OffsetNumber offnum;
+	Datum ret;
+	int32 	bitmap;
+	bool found;
+
+	key = radix_tree_offnum_get_key(itemptr, &offnum);
+
+	ret = radix_tree_search((radix_tree *) lvtt->private, key,
+							&found);
+
+	if (!found)
+		return false;
+
+	bitmap = DatumGetInt32(ret);
+
+	return ((bitmap & (1 << offnum)) != 0);
+}
+
+static uint64
+radix_tree_offnum_mem_usage(LVTestType *lvtt)
+{
+	radix_tree *tree = (radix_tree *) lvtt->private;
+	uint64 mem = radix_tree_memory_usage(tree);
+
+	radix_tree_stats(tree);
+
+	ereport(NOTICE,
+			errmsg("radix tree of %.2f MB",
+				   (double) mem / (1024 * 1024)),
+			errhidestmt(true),
+			errhidecontext(true));
+
+	return mem;
 }
 
 /* ---------- hash ---------- */
