@@ -365,7 +365,11 @@ repair_page_internal(Oid oid, BlockNumber blkno, const char *forkname,
 	target_lsn = GetXLogWriteRecPtr();
 
 	/* Create buffer tag and compute partition lock ID */
+#if PG_VERSION_NUM >= 160000
+	InitBufferTag(&tag, &relation->rd_smgr->smgr_rlocator.locator, forknum, blkno);
+#else
 	INIT_BUFFERTAG(tag, relation->rd_smgr->smgr_rnode.node, forknum, blkno);
+#endif
 	taghash = BufTableHashCode(&tag);
 	partlock = BufMappingPartitionLock(taghash);
 
