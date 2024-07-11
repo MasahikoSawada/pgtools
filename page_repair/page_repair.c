@@ -40,6 +40,12 @@ PG_MODULE_MAGIC;
 
 #define STANDBY_LSN_CHECK_INTERVAL (5 * 1000L) /* 5 sec */
 
+#ifdef pg_attribute_aligned
+	#define ALIGN_SIZE pg_attribute_aligned(PG_IO_ALIGN_SIZE)
+#else
+	#define ALIGN_SIZE
+#endif
+
 PGconn *conn = NULL;
 
 PG_FUNCTION_INFO_V1(pg_repair_page);
@@ -335,8 +341,8 @@ repair_page_internal(Oid oid, BlockNumber blkno, const char *forkname,
 	uint32		taghash;
 	LWLock		*partlock;
 	int			buf_id;
-	char		page[BLCKSZ];
-	char		standby_page[BLCKSZ];
+	char		page[BLCKSZ] ALIGN_SIZE;
+	char		standby_page[BLCKSZ] ALIGN_SIZE;
 	XLogRecPtr	target_lsn;
 
 	if (RecoveryInProgress())
