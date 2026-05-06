@@ -296,6 +296,8 @@ get_page(PG_FUNCTION_ARGS)
 	Relation	rel;
 	char	   *raw_page_data;
 	Buffer		buf;
+	uint16		new_checksum;
+	uint16		old_checksum;
 
 	if (!superuser())
 		ereport(ERROR,
@@ -321,6 +323,17 @@ get_page(PG_FUNCTION_ARGS)
 	ReleaseBuffer(buf);
 
 	relation_close(rel, AccessShareLock);
+
+	old_checksum = ((PageHeader) raw_page_data)->pd_checksum;
+	new_checksum = pg_checksum_page(raw_page_data, blkno);
+
+	if (old_checksum != new_checksum)
+	{
+		ereport(LOG,
+				(errmsg("page_repair: page checksum refreshed for block %u: old=%u new=%u",
+						blkno, old_checksum, new_checksum)));
+	}
+	((PageHeader) raw_page_data)->pd_checksum = new_checksum;
 
 	PG_RETURN_BYTEA_P(raw_page);
 }
